@@ -94,7 +94,10 @@ def load_config() -> Config:
     token = os.getenv("DISCORD_TOKEN")
     if not token:
         raise SystemExit("DISCORD_TOKEN is not set (see .env.example)")
-    servers, skipped = load_mcp_servers(os.getenv("MCP_SERVERS_FILE", "mcp_servers.json"))
+    # Relative paths are relative to the bot's directory, not the working directory.
+    servers_file = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                os.getenv("MCP_SERVERS_FILE") or "mcp_servers.json")
+    servers, skipped = load_mcp_servers(servers_file)
 
     return Config(
         discord_token=token,
