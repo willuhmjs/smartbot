@@ -1,8 +1,9 @@
-"""Long-lived connection to the discord-mcp server (HTTP streamable transport).
+"""Long-lived connection to an MCP server: discord-mcp over HTTP, or extra servers
+(e.g. SearXNG search) launched as a subprocess over stdio.
 
 The MCP SDK uses anyio cancel scopes that must be entered and exited in the same
 task, so the session lives inside one dedicated background task. That task also
-reconnects automatically if the server restarts.
+reconnects (or relaunches the subprocess) automatically if the server goes away.
 """
 
 import asyncio
@@ -11,6 +12,7 @@ import logging
 from typing import Any
 
 from mcp import ClientSession
+from mcp.client.stdio import StdioServerParameters, get_default_environment, stdio_client
 
 try:
     from mcp.client.streamable_http import streamablehttp_client as _http_client
@@ -26,8 +28,16 @@ def _field(obj: Any, snake: str, camel: str) -> Any:
 
 
 class McpClient:
-    def __init__(self, url: str, timeout: float = 60.0):
+    def __init__(self, name: str, *, url: str | None = None, command: str | None = None,
+                 args: list[str] | None = None, env: dict[str, str] | None = None, timeout: float = 60.0):
+        if not url and not command:
+            raise ValueError(f"MCP server {name!r} needs a url or a command")
+        self.name = name
         self.url = url
+        # Only a minimal environment (PATH, HOME, ...) plus the configured vars, so secrets like
+        # DISCORD_TOKEN never reach third-party servers.
+        self.stdio = None if url else StdioServerParameters(
+            command=command, args=args or [], env={**get_default_environment(), **(env or {})})
         self.timeout = timeout
         self.session: ClientSession | None = None
         self.tools: dict[str, dict[str, Any]] = {}  # name -> {"description", "inputSchema"}
@@ -37,11 +47,17 @@ class McpClient:
         self._task: asyncio.Task | None = None
 
     async def start(self, wait: float = 60.0) -> None:
-        self._task = asyncio.create_task(self._run(), name="mcp-connection")
+        """Connect in the background, waiting up to `wait` seconds for the first connection."""
+        self._task = asyncio.create_task(self._run(), name=f"mcp-{self.name}")
+        if wait <= 0:
+            return
         try:
             await asyncio.wait_for(self._ready.wait(), wait)
         except asyncio.TimeoutError:
-            log.warning("MCP server not reachable yet at %s; will keep retrying", self.url)
+            log.warning("MCP server %s not reachable yet; will keep retrying", self.name)
+
+    def _transport(self):
+        return _http_client(self.url) if self.url else stdio_client(self.stdio)
 
     async def stop(self) -> None:
         self._stopping = True
@@ -53,7 +69,7 @@ class McpClient:
         backoff = 1.0
         while not self._stopping:
             try:
-                async with _http_client(self.url) as streams:
+                async with self._transport() as streams:
                     read, write = streams[0], streams[1]
                     async with ClientSession(read, write) as session:
                         await session.initialize()
@@ -66,10 +82,10 @@ class McpClient:
                         self._restart.clear()
                         self._ready.set()
                         backoff = 1.0
-                        log.info("Connected to discord-mcp: %d tools", len(self.tools))
+                        log.info("Connected to %s: %d tools", self.name, len(self.tools))
                         await self._restart.wait()
             except Exception as e:  # noqa: BLE001 - keep the connection loop alive no matter what
-                log.warning("MCP connection error: %r", e)
+                log.warning("MCP %s connection error: %r", self.name, e)
             finally:
                 self.session = None
                 self._ready.clear()
@@ -83,7 +99,7 @@ class McpClient:
             try:
                 await asyncio.wait_for(self._ready.wait(), 15)
             except asyncio.TimeoutError:
-                return True, "Discord MCP server is unavailable right now."
+                return True, f"The {self.name} tool server is unavailable right now."
             session = self.session
             if session is None:
                 continue
@@ -99,7 +115,7 @@ class McpClient:
                     continue
                 return True, f"Tool '{name}' failed: {e}"
             return bool(_field(result, "is_error", "isError")), _content_to_text(result)
-        return True, "Discord MCP server is unavailable right now."
+        return True, f"The {self.name} tool server is unavailable right now."
 
 
 def _content_to_text(result: Any) -> str:

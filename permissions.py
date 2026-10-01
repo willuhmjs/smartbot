@@ -172,14 +172,19 @@ async def check_tool_permission(
     args: dict[str, Any],
     author: discord.Member,
     owner_ids: frozenset[int],
+    required: tuple[str, ...] | None = None,
 ) -> str | None:
-    """Return None if allowed, otherwise a human-readable reason for the denial."""
+    """Return None if allowed, otherwise a human-readable reason for the denial.
+
+    `required` overrides the TOOL_PERMISSIONS lookup (used for tools from extra MCP servers).
+    """
     if author.id in owner_ids:
         return None
 
     guild = author.guild
     is_guild_owner = guild.owner_id == author.id
-    required = TOOL_PERMISSIONS.get(tool, UNKNOWN_TOOL_PERMISSIONS)
+    if required is None:
+        required = TOOL_PERMISSIONS.get(tool, UNKNOWN_TOOL_PERMISSIONS)
 
     # Channel-scoped check: channel overwrites can grant or deny per channel.
     channel_ids = _find_ids(args, "channel", "thread", "post")

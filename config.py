@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
@@ -19,6 +20,46 @@ def _names(name: str) -> frozenset[str]:
 
 def _bool(name: str, default: bool) -> bool:
     return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
+
+
+def load_mcp_servers(path: str) -> tuple[list[dict], list[str]]:
+    """Read extra MCP servers from a Claude-style {"mcpServers": {...}} JSON file.
+
+    "${VAR}" in args/env/url is replaced from the environment (.env). A server that references an
+    unset or empty variable is skipped, so optional servers can ship in the file but stay off until
+    configured. Returns (servers, skip messages).
+    """
+    if not os.path.exists(path):
+        return [], []
+    with open(path) as f:
+        entries = json.load(f).get("mcpServers", {})
+
+    servers, skipped = [], []
+    for name, entry in entries.items():
+        missing: list[str] = []
+
+        def expand(value: str) -> str:
+            def sub(m: re.Match) -> str:
+                val = os.getenv(m.group(1), "")
+                if not val:
+                    missing.append(m.group(1))
+                return val
+            return re.sub(r"\$\{(\w+)\}", sub, value)
+
+        server = {
+            "name": name,
+            "url": expand(entry["url"]) if entry.get("url") else None,
+            "command": entry.get("command"),
+            "args": [expand(a) for a in entry.get("args", [])],
+            "env": {k: expand(v) for k, v in entry.get("env", {}).items()},
+            # Discord permissions needed to use this server's tools; omitted means administrator.
+            "permissions": tuple(entry.get("permissions", ("administrator",))),
+        }
+        if missing:
+            skipped.append(f"{name} (set {', '.join(sorted(set(missing)))} to enable)")
+        else:
+            servers.append(server)
+    return servers, skipped
 
 
 @dataclass(frozen=True)
@@ -45,11 +86,15 @@ class Config:
     show_tool_trace: bool
     members_intent: bool
 
+    mcp_servers: tuple[dict, ...]
+    mcp_servers_skipped: tuple[str, ...]
+
 
 def load_config() -> Config:
     token = os.getenv("DISCORD_TOKEN")
     if not token:
         raise SystemExit("DISCORD_TOKEN is not set (see .env.example)")
+    servers, skipped = load_mcp_servers(os.getenv("MCP_SERVERS_FILE", "mcp_servers.json"))
 
     return Config(
         discord_token=token,
@@ -70,4 +115,6 @@ def load_config() -> Config:
         user_cooldown=float(os.getenv("USER_COOLDOWN", "3")),
         show_tool_trace=_bool("SHOW_TOOL_TRACE", True),
         members_intent=_bool("MEMBERS_INTENT", False),
+        mcp_servers=tuple(servers),
+        mcp_servers_skipped=tuple(skipped),
     )

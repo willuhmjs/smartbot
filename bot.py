@@ -19,7 +19,9 @@ NO_REPLY = "NO_REPLY"
 
 SYSTEM_PROMPT = """You are {bot_name}, an AI assistant that lives in the Discord server "{guild_name}". \
 People @mention you to ask questions or get things done in the server. You have tools that act on \
-Discord directly (channels, roles, messages, moderation, events, invites, emojis, and more).
+Discord directly (channels, roles, messages, moderation, events, invites, emojis, and more). You may \
+also have other tools, such as web search: use them when a question needs current or outside information, \
+and link your sources.
 
 ## Context
 - Current time (UTC): {now}
@@ -90,7 +92,14 @@ class SmartBot(discord.Client):
             allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True, replied_user=True),
         )
         self.cfg = cfg
-        self.mcp = McpClient(cfg.mcp_url, timeout=cfg.tool_timeout)
+        self.mcp = McpClient("discord-mcp", url=cfg.mcp_url, timeout=cfg.tool_timeout)
+        # Extra servers from mcp_servers.json (e.g. SearXNG web search).
+        self.extra_mcp = [
+            McpClient(s["name"], url=s["url"], command=s["command"], args=s["args"], env=s["env"],
+                      timeout=cfg.tool_timeout)
+            for s in cfg.mcp_servers
+        ]
+        self._server_perms = {s["name"]: s["permissions"] for s in cfg.mcp_servers}
         self.agent = Agent(
             base_url=cfg.llm_base_url, api_key=cfg.llm_api_key, model=cfg.llm_model,
             temperature=cfg.llm_temperature, extra_body=cfg.llm_extra_body,
@@ -101,10 +110,15 @@ class SmartBot(discord.Client):
         self._tools_cache: tuple[int, list[dict], set[str]] | None = None
 
     async def setup_hook(self) -> None:
+        for skipped in self.cfg.mcp_servers_skipped:
+            log.info("MCP server skipped: %s", skipped)
+        for client in self.extra_mcp:
+            await client.start(wait=0)
         await self.mcp.start()
 
     async def close(self) -> None:
-        await self.mcp.stop()
+        for client in [self.mcp, *self.extra_mcp]:
+            await client.stop()
         await super().close()
 
     async def on_ready(self) -> None:
@@ -112,14 +126,23 @@ class SmartBot(discord.Client):
 
     # ---------- tools ----------
 
+    def _tool_owners(self) -> dict[str, McpClient]:
+        """Tool name -> the server that provides it. discord-mcp wins any name clash."""
+        owners: dict[str, McpClient] = {}
+        for client in [self.mcp, *self.extra_mcp]:
+            for name in client.tools:
+                if name not in self.cfg.disabled_tools:
+                    owners.setdefault(name, client)
+        return owners
+
     def _openai_tools(self) -> tuple[list[dict], set[str]]:
-        """OpenAI-format tools plus the set of guild-id param names, rebuilt when MCP reconnects."""
-        tools = {n: t for n, t in self.mcp.tools.items() if n not in self.cfg.disabled_tools}
+        """OpenAI-format tools plus the set of guild-id param names, rebuilt when a server (re)connects."""
+        tools = {n: c.tools[n] for n, c in self._tool_owners().items()}
         key = hash(tuple(sorted(tools)))
         if self._tools_cache and self._tools_cache[0] == key:
             return self._tools_cache[1], self._tools_cache[2]
         guild_params = {
-            p for t in tools.values() for p in (t["inputSchema"] or {}).get("properties", {})
+            p for t in self.mcp.tools.values() for p in (t["inputSchema"] or {}).get("properties", {})
             if p.lower().replace("_", "") == "guildid"
         }
         converted = mcp_tools_to_openai(tools, guild_params)
@@ -131,21 +154,23 @@ class SmartBot(discord.Client):
         guild = message.guild
 
         async def execute(name: str, args: dict) -> str:
-            if name not in self.mcp.tools or name in self.cfg.disabled_tools:
+            client = self._tool_owners().get(name)
+            if client is None:
                 return f"ERROR: unknown tool '{name}'."
-            schema_props = (self.mcp.tools[name]["inputSchema"] or {}).get("properties", {})
+            schema_props = (client.tools[name]["inputSchema"] or {}).get("properties", {})
             for p in guild_params:
                 args.pop(p, None)
                 if p in schema_props:
                     args[p] = str(guild.id)
 
-            denial = await check_tool_permission(name, args, author, self.cfg.owner_ids)
+            required = None if client is self.mcp else self._server_perms[client.name]
+            denial = await check_tool_permission(name, args, author, self.cfg.owner_ids, required)
             if denial:
                 log.info("DENIED %s -> %s %s (%s)", author, name, args, denial)
                 return f"PERMISSION DENIED: {denial}."
 
             log.info("TOOL %s (%s) in #%s -> %s %s", author, author.id, message.channel, name, args)
-            is_error, text = await self.mcp.call_tool(name, args)
+            is_error, text = await client.call_tool(name, args)
             return f"ERROR: {text}" if is_error else text
 
         return execute
