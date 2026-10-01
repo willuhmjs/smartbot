@@ -1,0 +1,23 @@
+services:
+  discord-mcp:
+    image: saseq/discord-mcp:latest
+    restart: unless-stopped
+    environment:
+      SPRING_PROFILES_ACTIVE: http
+      DISCORD_TOKEN: ${DISCORD_TOKEN}
+      DISCORD_GUILD_ID: ${DISCORD_GUILD_ID:-}
+    ports:
+      - "8085:8085"
+
+  smartbot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MCP_URL: http://discord-mcp:8085/mcp
+      # If Qwen runs on the host via Ollama, reach it from the container like this:
+      LLM_BASE_URL: ${LLM_BASE_URL_DOCKER:-http://host.docker.internal:11434/v1}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - discord-mcp
