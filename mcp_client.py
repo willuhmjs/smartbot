@@ -20,6 +20,11 @@ except ImportError:  # newer SDK naming
 log = logging.getLogger("smartbot.mcp")
 
 
+def _field(obj: Any, snake: str, camel: str) -> Any:
+    """mcp 2.x renamed fields to snake_case (inputSchema -> input_schema); accept both."""
+    return getattr(obj, snake, None) if hasattr(obj, snake) else getattr(obj, camel, None)
+
+
 class McpClient:
     def __init__(self, url: str, timeout: float = 60.0):
         self.url = url
@@ -54,7 +59,7 @@ class McpClient:
                         await session.initialize()
                         listed = await session.list_tools()
                         self.tools = {
-                            t.name: {"description": t.description or "", "inputSchema": t.inputSchema or {}}
+                            t.name: {"description": t.description or "", "inputSchema": _field(t, "input_schema", "inputSchema") or {}}
                             for t in listed.tools
                         }
                         self.session = session
@@ -93,7 +98,7 @@ class McpClient:
                     await asyncio.sleep(0.5)
                     continue
                 return True, f"Tool '{name}' failed: {e}"
-            return bool(result.isError), _content_to_text(result)
+            return bool(_field(result, "is_error", "isError")), _content_to_text(result)
         return True, "Discord MCP server is unavailable right now."
 
 
@@ -105,7 +110,7 @@ def _content_to_text(result: Any) -> str:
             parts.append(text)
         else:
             parts.append(json.dumps(item.model_dump(exclude_none=True), default=str)[:500])
-    structured = getattr(result, "structuredContent", None)
+    structured = _field(result, "structured_content", "structuredContent")
     if not parts and structured:
         parts.append(json.dumps(structured, default=str))
     return "\n".join(parts) or "(no output)"
