@@ -359,6 +359,26 @@ def _missing(perms: discord.Permissions, required: tuple[str, ...]) -> list[str]
     return [p for p in required if not getattr(perms, p, False)]
 
 
+def effective_permissions(member: discord.Member) -> discord.Permissions:
+    """Everything the member can do somewhere in the server: their server-wide permissions plus any a
+    channel grants them. Decides which tools the model is offered at all; each call is still checked
+    against the exact channel by check_tool_permission."""
+    perms = discord.Permissions(member.guild_permissions.value)
+    for channel in member.guild.channels:
+        perms |= channel.permissions_for(member)
+    return perms
+
+
+def tool_allowed(tool: str, perms: discord.Permissions, required: tuple[str, ...] | None = None) -> bool:
+    """Whether a member with `perms` could make any allowed call to `tool`. Tools that fail this are left
+    out of the model's tool list, so it can't call them for this member even if a message tricks it."""
+    if required is None:
+        required = TOOL_PERMISSIONS.get(tool, UNKNOWN_TOOL_PERMISSIONS)
+        if callable(required):
+            required = required({})  # the least a call can need
+    return not _missing(perms, required)
+
+
 def permission_summary(member: discord.Member) -> str:
     perms = member.guild_permissions
     if member.guild.owner_id == member.id:

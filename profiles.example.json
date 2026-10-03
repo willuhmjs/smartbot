@@ -8,7 +8,9 @@
       "avatar": "profiles/acme/avatar.png",
       "banner": "profiles/acme/banner.png",
       "bio": "Acme's assistant. @mention me!",
-      "admins_only": true
+      "access": "manage_guild",
+      "automod": true,
+      "modlog_channel": "456789012345678901"
     },
     "234567890123456789": {
       "nickname": "Acme Games",

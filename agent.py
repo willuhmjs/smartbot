@@ -90,8 +90,9 @@ class Agent:
         self.max_rounds = max_rounds
         self.tool_result_max_chars = tool_result_max_chars
 
-    async def _complete(self, messages: list[dict], tools: list[dict] | None, tool_choice: str = "auto"):
-        kwargs: dict[str, Any] = {"model": self.model, "messages": messages, "temperature": self.temperature}
+    async def _complete(self, messages: list[dict], tools: list[dict] | None, tool_choice: str = "auto",
+                        model: str | None = None):
+        kwargs: dict[str, Any] = {"model": model or self.model, "messages": messages, "temperature": self.temperature}
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice
@@ -107,10 +108,12 @@ class Agent:
                     raise
                 await asyncio.sleep(2 ** attempt)
 
-    async def run(self, messages: list[dict], tools: list[dict], execute: ToolExecutor) -> AgentResult:
+    async def run(self, messages: list[dict], tools: list[dict], execute: ToolExecutor,
+                  model: str | None = None) -> AgentResult:
+        """`model` overrides the default model (per-server model choice)."""
         used: list[str] = []
         for _ in range(self.max_rounds):
-            msg = await self._complete(messages, tools)
+            msg = await self._complete(messages, tools, model=model)
             content = msg.content or ""
 
             tool_calls = [
@@ -146,5 +149,5 @@ class Agent:
             "content": "You've hit the tool-call limit. Stop calling tools and reply to the user now with "
                        "what you did, what's still left, and anything that failed.",
         })
-        msg = await self._complete(messages, tools, tool_choice="none")
+        msg = await self._complete(messages, tools, tool_choice="none", model=model)
         return AgentResult(clean_reply(msg.content), used)

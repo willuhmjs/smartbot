@@ -5,3 +5,4 @@ __pycache__/
 profiles.json
 .profile-state.json
 .pytest_cache/
+data/

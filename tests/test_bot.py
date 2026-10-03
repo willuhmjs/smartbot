@@ -15,6 +15,7 @@ from permissions import check_tool_permission  # noqa: E402
 def make_bot(tmp_path, monkeypatch, profiles, **env):
     (tmp_path / "profiles.json").write_text(json.dumps(profiles))
     monkeypatch.setenv("PROFILES_FILE", str(tmp_path / "profiles.json"))
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
     for k, v in env.items():
         monkeypatch.setenv(k, v)
     return bot.SmartBot(load_config())
@@ -34,8 +35,8 @@ class FakeMember(SimpleNamespace):
     pass
 
 
-def member(uid, admin=False, roles=()):
-    return FakeMember(id=uid, bot=False, guild_permissions=SimpleNamespace(administrator=admin),
+def member(uid, admin=False, roles=(), manage_guild=False):
+    return FakeMember(id=uid, bot=False, guild_permissions=SimpleNamespace(administrator=admin, manage_guild=manage_guild),
                       roles=[SimpleNamespace(id=r) for r in roles])
 
 
@@ -81,3 +82,11 @@ def test_persona_in_prompt():
 def test_owner_bypasses_tool_permissions():
     author = SimpleNamespace(id=7, guild=None)
     assert asyncio.run(check_tool_permission("delete_channel", {}, author, frozenset({7}))) is None
+
+
+def test_access_manage_guild(tmp_path, monkeypatch):
+    b = make_bot(tmp_path, monkeypatch, {"default": {"access": "manage_guild"}}, USER_COOLDOWN="0")
+    msg = Msg(1, member(10))
+    assert not handled(b, msg, monkeypatch) and "Manage Server" in msg.replies[0]
+    assert handled(b, Msg(1, member(11, manage_guild=True)), monkeypatch)
+    assert handled(b, Msg(1, member(12, admin=True)), monkeypatch)

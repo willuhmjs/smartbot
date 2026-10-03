@@ -49,16 +49,64 @@ its own face in each server, so one bot account can carry several brands:
 | `avatar`, `banner` | Its picture and profile banner there. A path relative to the profiles file, or an https URL; PNG, JPEG or GIF |
 | `bio` | Its "About me" there |
 | `persona` / `persona_file` | Extra instructions added to its system prompt there: voice, brand, what the server is about |
-| `admins_only`, `allowed_role_ids` | Who can use it there, overriding `ADMINS_ONLY` / `ALLOWED_ROLE_IDS` |
+| `access`, `allowed_role_ids` | Who can use it there (`everyone`, `manage_guild` or `administrator`), overriding `ACCESS` / `ALLOWED_ROLE_IDS` |
+| any other setting | e.g. `automod`, `model`, `escalation`: the deployment's value for a setting below |
 
 `default` applies everywhere and each entry under `servers` (keyed by server ID) is layered on top. A field that
 is absent is left alone, and `null` resets it to the bot's global profile. Profiles are applied on start-up, when
 the bot joins a server, and within 30 seconds of the file (or a persona file) changing, without a restart.
 
 Discord rate limits profile changes, so the bot only sends fields that changed: the nickname is compared with
-Discord's, and for images and bios it remembers what it last sent in `.profile-state.json` (`PROFILE_STATE_FILE`).
-If you change an avatar by hand in Discord, the bot won't notice until the file changes; delete the state file
-to make it resend everything. Changing the nickname needs the **Change Nickname** permission.
+Discord's, and for images and bios it remembers what it last sent in its database. If you change an avatar by
+hand in Discord, the bot won't notice until the file changes; `DELETE FROM profile_state` in the database makes it
+resend everything. Changing the nickname needs the **Change Nickname** permission.
+
+## Settings from Discord
+
+Members with **Manage Server** can change the bot's settings in their server, either with slash commands
+or by asking it (`@SmartBot turn on automod and log to #mod-log`). Changes are stored in
+the database and layered on top of `profiles.json`; `/settings reset` goes back to the
+deployment's value.
+
+| Command | |
+|---|---|
+| `/settings view [section]` | Every setting, its value and where it comes from |
+| `/settings set <key> <value>` | Change one (autocompletes keys and values) |
+| `/settings reset <key>` | Undo a change made in Discord |
+| `/settings rules` · `persona` · `bio` | Edit long text in a form |
+| `/settings avatar` · `banner` | Upload an image |
+| `/settings test-automod <message>` | What automod would decide, without acting |
+| `/strikes view` · `add` · `clear` | Members' strikes (needs **Moderate Members**) |
+
+Settings: identity (nickname, avatar, banner, bio, persona), access, the model for chat and for automod,
+automod (rules, channels, exempt roles, severity tiers), anti-spam (flood, duplicate and mention limits, raid
+alerts), the mod log channel, and strikes (expiry, escalation to timeout/kick/ban).
+
+**A setting needs the permissions its value uses.** Turning on automod or a `delete_warn` tier needs
+**Manage Messages**; an escalation step that bans needs **Ban Members**. Someone with only Manage Server can't
+set up the bot to do what they couldn't do themselves.
+
+### Automod
+With `automod` on, each message in a watched channel goes to `automod_model` (`AUTOMOD_MODEL`; gpt-oss-120b
+works well) with the rules and the previous few messages. It answers with a rule and a severity, and
+`automod_tiers` decides what happens for each: `none`, `log` (mod log only) or `delete_warn` (delete the
+message and warn the author), plus how many strikes to add. Edited messages are checked again. Bots, owners,
+admins, members with Manage Messages and `automod_exempt_roles` are never checked.
+
+### Anti-spam and strikes
+`antispam` deletes floods, repeats and mass mentions and adds strikes. `raid_joins` alerts the mod log (and can
+raise verification) when that many members join within a minute; this needs `MEMBERS_INTENT=true`. Strikes
+expire after `strike_expiry_days`, and `escalation` lists steps like
+`[{"strikes": 3, "action": "timeout", "minutes": 60}, {"strikes": 5, "action": "ban"}]`. Every action is
+posted to `modlog_channel`.
+
+## Database
+Everything the bot remembers lives in one SQLite file, `DATA_DIR/smartbot.db` (or `DATABASE_FILE`): settings
+changed from Discord (with who changed them and when), strikes (cleared and expired ones are kept as history),
+uploaded avatars and banners, and what it last sent to Discord for each profile. It's created readable only by
+the bot's account. It uses SQLite's default rollback journal, not WAL, so it works on NFS, as long as only
+one bot process uses it. Back it up with `sqlite3 data/smartbot.db ".backup backup.db"`. A
+`.profile-state.json` from older versions is imported once.
 
 ## Running discord-mcp privately
 
@@ -83,12 +131,14 @@ network, add it to `DISABLED_TOOLS` or give searxng `"permissions": ["administra
   the replied-to message, mentioned users/roles/channels with IDs, attachments, and images if `VISION=true`.
 - **Agent loop** (`agent.py`): runs up to `MAX_TOOL_ROUNDS` rounds of tool calls, recovers from tool errors,
   strips Qwen `<think>` blocks, and also parses `<tool_call>` text when the server's tool parser is off.
-- **Safety** (`permissions.py`): every tool call is checked against the *requester's* Discord
-  permissions, scoped to the target channel, plus role-hierarchy checks and an @everyone/role-ping
-  guard. `guildId` is always forced to the current server.
-- **Access**: `OWNER_IDS` bypass every check. `ADMINS_ONLY=true` limits the bot to members with
-  **Administrator** (and the server owner); `ALLOWED_ROLE_IDS` limits it to members with one of those roles.
-  Both can be set per server in `profiles.json`.
+- **Safety** (`permissions.py`): the model is only *given* the tools the requester could use themselves:
+  someone without Ban Members never sees `ban_member`, so a prompt injection can't reach it. A tool call
+  for anything not offered is refused, and every call is checked again against the requester's
+  permissions in the target channel, plus role-hierarchy checks and an @everyone/role-ping guard.
+  `guildId` is always forced to the current server. Changes made through discord-mcp go to the mod log.
+- **Access**: `OWNER_IDS` bypass every check. `ACCESS` is `everyone`, `manage_guild` or `administrator`
+  (the server owner always qualifies); `ALLOWED_ROLE_IDS` limits the bot to members with one of those roles.
+  Both can be set per server.
 - One request at a time per channel, a per-user cooldown, and long replies split across messages.
 
 ## Tests

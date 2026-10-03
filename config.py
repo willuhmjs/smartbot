@@ -71,6 +71,7 @@ class Config:
     llm_base_url: str
     llm_api_key: str
     llm_model: str
+    automod_model: str
     llm_temperature: float
     llm_extra_body: dict
     vision: bool
@@ -81,7 +82,7 @@ class Config:
     tool_timeout: float
 
     owner_ids: frozenset[int]
-    admins_only: bool
+    access: str  # who can @mention the bot by default: everyone, manage_guild or administrator
     allowed_role_ids: frozenset[int]
     disabled_tools: frozenset[str]
     user_cooldown: float
@@ -92,7 +93,8 @@ class Config:
     mcp_servers_skipped: tuple[str, ...]
 
     profiles_file: str | None
-    profile_state_file: str | None
+    profile_state_file: str | None  # older versions' state file, imported once
+    database_file: str
 
 
 def load_config() -> Config:
@@ -103,6 +105,10 @@ def load_config() -> Config:
     here = os.path.dirname(os.path.abspath(__file__))
     servers_file = os.path.join(here, os.getenv("MCP_SERVERS_FILE") or "mcp_servers.json")
     servers, skipped = load_mcp_servers(servers_file)
+    data_dir = os.path.join(here, os.getenv("DATA_DIR") or "data")
+    access = (os.getenv("ACCESS") or ("administrator" if _bool("ADMINS_ONLY", False) else "everyone")).strip().lower()
+    if access not in ("everyone", "manage_guild", "administrator"):
+        raise SystemExit(f"ACCESS must be everyone, manage_guild or administrator (got {access!r})")
 
     return Config(
         discord_token=token,
@@ -111,6 +117,7 @@ def load_config() -> Config:
         llm_base_url=os.getenv("LLM_BASE_URL", "http://localhost:11434/v1"),
         llm_api_key=os.getenv("LLM_API_KEY", "ollama"),
         llm_model=os.getenv("LLM_MODEL", "qwen3:14b"),
+        automod_model=os.getenv("AUTOMOD_MODEL") or os.getenv("LLM_MODEL", "qwen3:14b"),
         llm_temperature=float(os.getenv("LLM_TEMPERATURE", "0.6")),
         llm_extra_body=json.loads(os.getenv("LLM_EXTRA_BODY", "{}") or "{}"),
         vision=_bool("VISION", False),
@@ -119,7 +126,7 @@ def load_config() -> Config:
         tool_result_max_chars=int(os.getenv("TOOL_RESULT_MAX_CHARS", "6000")),
         tool_timeout=float(os.getenv("TOOL_TIMEOUT", "60")),
         owner_ids=_ids("OWNER_IDS"),
-        admins_only=_bool("ADMINS_ONLY", False),
+        access=access,
         allowed_role_ids=_ids("ALLOWED_ROLE_IDS"),
         disabled_tools=_names("DISABLED_TOOLS"),
         user_cooldown=float(os.getenv("USER_COOLDOWN", "3")),
@@ -129,4 +136,5 @@ def load_config() -> Config:
         mcp_servers_skipped=tuple(skipped),
         profiles_file=os.path.join(here, os.getenv("PROFILES_FILE") or "profiles.json"),
         profile_state_file=os.getenv("PROFILE_STATE_FILE") or None,
+        database_file=os.path.join(here, os.getenv("DATABASE_FILE") or os.path.join(data_dir, "smartbot.db")),
     )
