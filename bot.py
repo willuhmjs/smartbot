@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timezone
+from typing import Any
 
 import discord
 
@@ -11,6 +12,7 @@ from agent import Agent, mcp_tools_to_openai
 from config import Config, load_config
 from mcp_client import McpClient
 from permissions import check_tool_permission, permission_summary
+from profiles import Profiles
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("smartbot")
@@ -47,6 +49,11 @@ two channels called "general"?), ask first.
 - Your final text is posted automatically as a reply to the requester's message. Don't use \
 send_message to reply in the current channel. Only use it to post somewhere else, or when explicitly asked.
 - To ping someone, use <@USER_ID>. To link a channel, use <#CHANNEL_ID>.
+- Messages can carry more than text. send_message takes embedsJson (cards), componentsJson (buttons and \
+selects), componentsV2, pollJson, filesJson and replyToMessageId. For "click to get a role" use \
+create_role_menu: its buttons and menus keep working after restarts. Other buttons only work as links.
+- In the recent-message history, embeds, components, polls, attachments, stickers and forwards appear as \
+markers like [embed: title — description] and [poll: question (N votes)].
 - If an action already says everything (for example, you only added a reaction), you can reply with \
 exactly {no_reply}.
 
@@ -55,6 +62,11 @@ exactly {no_reply}.
 - Once you've acted, confirm what you did in a sentence or two, mentioning the created or changed \
 things by name or link. Don't dump raw JSON or IDs unless they were asked for.
 - Answer normal questions and chat directly. Not everything needs a tool.
+{persona}"""
+
+PERSONA_SECTION = """
+## Persona in this server
+{text}
 """
 
 
@@ -82,6 +94,60 @@ def _fmt_time(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
 
 
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def _component_markers(components: Any) -> list[str]:
+    """Count the buttons and selects in a message (looking inside action rows, containers and sections)
+    and pick up text from Components V2 messages, which have no ordinary content."""
+    buttons = selects = 0
+    texts: list[str] = []
+
+    def walk(component: Any) -> None:
+        nonlocal buttons, selects
+        kind = getattr(getattr(component, "type", None), "name", "")
+        if kind == "button":
+            buttons += 1
+        elif kind.endswith("select"):
+            selects += 1
+        elif kind == "text_display" and getattr(component, "content", None):
+            texts.append(component.content)
+        for child in getattr(component, "children", None) or []:
+            walk(child)
+        if getattr(component, "accessory", None) is not None:
+            walk(component.accessory)
+
+    for component in components or []:
+        walk(component)
+    out = []
+    counts = [_plural(n, w) for n, w in ((buttons, "button"), (selects, "select")) if n]
+    if counts:
+        out.append(f"[components: {', '.join(counts)}]")
+    if texts:
+        out.append(f"[text: {' '.join(texts)[:200]}]")
+    return out
+
+
+def message_markers(m: Any) -> list[str]:
+    """Compact markers for what a message carries besides its text, in the same form discord-mcp's
+    read_messages uses, so the agent sees one consistent picture. Every attribute is read defensively."""
+    out = []
+    for embed in getattr(m, "embeds", None) or []:
+        title = getattr(embed, "title", None) or ""
+        description = (getattr(embed, "description", None) or "")[:100]
+        out.append(f"[embed: {title} — {description}]" if title and description else f"[embed: {title or description}]")
+    out.extend(_component_markers(getattr(m, "components", None)))
+    poll = getattr(m, "poll", None)
+    if poll is not None:
+        out.append(f"[poll: {getattr(poll, 'question', '')} ({getattr(poll, 'total_votes', 0)} votes)]")
+    out.extend(f"[attachment: {a.filename} {a.url}]" for a in getattr(m, "attachments", None) or [])
+    if getattr(m, "message_snapshots", None):
+        out.append("[forwarded]")
+    out.extend(f"[sticker: {st.name}]" for st in getattr(m, "stickers", None) or [])
+    return out
+
+
 class SmartBot(discord.Client):
     def __init__(self, cfg: Config):
         intents = discord.Intents.default()
@@ -92,7 +158,8 @@ class SmartBot(discord.Client):
             allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True, replied_user=True),
         )
         self.cfg = cfg
-        self.mcp = McpClient("discord-mcp", url=cfg.mcp_url, timeout=cfg.tool_timeout)
+        self.mcp = McpClient("discord-mcp", url=cfg.mcp_url, timeout=cfg.tool_timeout,
+                             socket_path=cfg.mcp_socket or None)
         # Extra servers from mcp_servers.json (e.g. SearXNG web search).
         self.extra_mcp = [
             McpClient(s["name"], url=s["url"], command=s["command"], args=s["args"], env=s["env"],
@@ -108,6 +175,9 @@ class SmartBot(discord.Client):
         self._channel_locks: dict[int, asyncio.Lock] = {}
         self._last_use: dict[int, float] = {}
         self._tools_cache: tuple[int, list[dict], set[str]] | None = None
+        # Per-server identity (nickname, avatar, banner, bio, persona) from PROFILES_FILE.
+        self.profiles = Profiles(cfg.profiles_file, cfg.profile_state_file)
+        self.profiles.reload_if_changed()
 
     async def setup_hook(self) -> None:
         for skipped in self.cfg.mcp_servers_skipped:
@@ -115,6 +185,7 @@ class SmartBot(discord.Client):
         for client in self.extra_mcp:
             await client.start(wait=0)
         await self.mcp.start()
+        self._profiles_task = asyncio.create_task(self._watch_profiles(), name="profiles")
 
     async def close(self) -> None:
         for client in [self.mcp, *self.extra_mcp]:
@@ -123,6 +194,25 @@ class SmartBot(discord.Client):
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s (%s) in %d server(s)", self.user, self.user.id, len(self.guilds))
+        await self._apply_profiles()
+
+    async def on_guild_join(self, guild: discord.Guild) -> None:
+        await self.profiles.apply(self, guild)
+
+    async def _apply_profiles(self) -> None:
+        for guild in self.guilds:
+            await self.profiles.apply(self, guild)
+
+    async def _watch_profiles(self) -> None:
+        """Pick up edits to the profiles file without a restart."""
+        await self.wait_until_ready()
+        while not self.is_closed():
+            await asyncio.sleep(30)
+            try:
+                if self.profiles.reload_if_changed():
+                    await self._apply_profiles()
+            except Exception:  # noqa: BLE001 - never let a bad profile stop the watcher
+                log.exception("Applying profiles failed")
 
     # ---------- tools ----------
 
@@ -180,13 +270,9 @@ class SmartBot(discord.Client):
     def _fmt_message(self, m: discord.Message) -> str:
         who = "You" if m.author.id == self.user.id else f"{m.author.display_name} (id {m.author.id})"
         content = m.content or ""
-        if m.attachments:
-            content += " " + " ".join(f"[attachment: {a.filename} {a.url}]" for a in m.attachments)
-        if m.embeds and not content.strip():
-            e = m.embeds[0]
-            content = f"[embed: {e.title or ''} {e.description or ''}]"
         if len(content) > 600:
             content = content[:600] + "…"
+        content = " ".join([content, *message_markers(m)]).strip()
         reply = ""
         if m.reference and isinstance(m.reference.resolved, discord.Message):
             reply = f" (replying to {m.reference.resolved.author.display_name})"
@@ -211,6 +297,7 @@ class SmartBot(discord.Client):
             author_name=author.display_name, author_username=author.name, author_id=author.id,
             author_roles=", ".join(roles[:15]) or "none",
             author_perms=permission_summary(author), no_reply=NO_REPLY,
+            persona=PERSONA_SECTION.format(text=persona) if (persona := self.profiles.persona(guild.id)) else "",
         )
         messages: list[dict] = [{"role": "system", "content": system}]
 
@@ -289,12 +376,18 @@ class SmartBot(discord.Client):
             return
 
         author = message.author
-        if (self.cfg.allowed_role_ids and author.id not in self.cfg.owner_ids
-                and not any(r.id in self.cfg.allowed_role_ids for r in author.roles)):
+        is_owner = author.id in self.cfg.owner_ids
+        admins_only, allowed_roles = self.profiles.access(
+            message.guild.id, self.cfg.admins_only, self.cfg.allowed_role_ids)
+        is_admin = author.guild_permissions.administrator or author.id == message.guild.owner_id
+        if not is_owner and admins_only and not is_admin:
+            await message.reply("Only server administrators can use me here.", mention_author=False)
+            return
+        if not is_owner and allowed_roles and not any(r.id in allowed_roles for r in author.roles):
             return
 
         now = time.monotonic()
-        if now - self._last_use.get(author.id, 0) < self.cfg.user_cooldown and author.id not in self.cfg.owner_ids:
+        if now - self._last_use.get(author.id, 0) < self.cfg.user_cooldown and not is_owner:
             await message.add_reaction("⏳")
             return
         self._last_use[author.id] = now

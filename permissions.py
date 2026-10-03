@@ -6,13 +6,46 @@ hierarchy checks for moderation and role tools. Without this, anyone who can
 @ the bot could have it ban people or delete channels.
 """
 
-from typing import Any
+import json
+import re
+from typing import Any, Callable
 
 import discord
 
-# Tool name -> Discord permissions the requester must have.
+def _truthy(value: Any) -> bool:
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _present(args: dict[str, Any], key: str) -> bool:
+    return args.get(key) not in (None, "")
+
+
+def _create_thread(args: dict[str, Any]) -> tuple[str, ...]:
+    return ("create_private_threads",) if _truthy(args.get("private")) else ("create_public_threads",)
+
+
+def _archived_threads(args: dict[str, Any]) -> tuple[str, ...]:
+    base = ("read_message_history",)
+    return base + ("manage_threads",) if _truthy(args.get("private")) else base
+
+
+def _edit_member(args: dict[str, Any]) -> tuple[str, ...]:
+    """edit_member bundles several actions; require the permission for each field that is set."""
+    needs = {"nick": "manage_nicknames", "roleIds": "manage_roles", "timeoutUntil": "moderate_members",
+             "mute": "mute_members", "deaf": "deafen_members", "voiceChannelId": "move_members"}
+    required = tuple(perm for key, perm in needs.items() if _present(args, key))
+    return required or ("manage_nicknames",)  # nothing to change: fail like the smallest action
+
+
+def _channel_write(args: dict[str, Any]) -> tuple[str, ...]:
+    # Permission overwrites need Manage Roles on top of Manage Channels (Discord's own rule).
+    extra = _present(args, "overwritesJson") or _truthy(args.get("lockPermissions"))
+    return ("manage_channels", "manage_roles") if extra else ("manage_channels",)
+
+
+# Tool name -> Discord permissions the requester must have (or a function of the arguments).
 # Tools not listed here (e.g. new ones added to discord-mcp later) require administrator.
-TOOL_PERMISSIONS: dict[str, tuple[str, ...]] = {
+TOOL_PERMISSIONS: dict[str, tuple[str, ...] | Callable[[dict[str, Any]], tuple[str, ...]]] = {
     # Server info / lookups
     "get_server_info": (),
     "get_user_id_by_name": (),
@@ -100,6 +133,115 @@ TOOL_PERMISSIONS: dict[str, tuple[str, ...]] = {
     "create_emoji": ("manage_expressions",),
     "edit_emoji": ("manage_expressions",),
     "delete_emoji": ("manage_expressions",),
+    # ---- Added by willuhmjs/discord-mcp (the 75 tools above keep their legacy names) ----
+    # Messages
+    "get_message": ("read_message_history",),
+    "get_attachment": ("read_message_history",),
+    "search_messages": ("read_message_history",),  # also needs a channelId, see CHANNEL_REQUIRED_TOOLS
+    "list_pins": ("read_message_history",),
+    "list_reactions": ("read_message_history",),
+    "get_poll_voters": ("read_message_history",),
+    "forward_message": ("send_messages", "read_message_history"),
+    "pin_message": ("manage_messages",),
+    "unpin_message": ("manage_messages",),
+    "bulk_delete_messages": ("manage_messages",),
+    "crosspost_message": ("manage_messages",),
+    "clear_reactions": ("manage_messages",),
+    "remove_user_reaction": ("manage_messages",),
+    "end_poll": ("manage_messages",),
+    "send_typing": ("send_messages",),
+    "create_role_menu": ("manage_roles", "send_messages"),
+    "list_interactions": (),
+    # Channels
+    "create_channel": _channel_write,
+    "edit_channel": _channel_write,
+    "follow_announcement_channel": ("manage_webhooks",),
+    "list_channel_invites": ("manage_channels",),
+    # Voice / stage
+    "set_voice_channel_status": ("manage_channels",),
+    "create_stage_instance": ("mute_members", "move_members"),
+    "edit_stage_instance": ("mute_members", "move_members"),
+    "delete_stage_instance": ("mute_members", "move_members"),
+    # Forums
+    "create_forum_tag": ("manage_threads",),
+    "edit_forum_tag": ("manage_threads",),
+    "delete_forum_tag": ("manage_threads",),
+    # Threads
+    "list_active_threads": ("read_message_history",),
+    "create_thread": _create_thread,
+    "edit_thread": ("manage_threads",),
+    "add_thread_member": ("manage_threads",),
+    "remove_thread_member": ("manage_threads",),
+    "list_thread_members": ("read_message_history",),
+    "join_thread": (),
+    "leave_thread": (),
+    "list_archived_threads": _archived_threads,
+    # Members and moderation
+    "get_member": (),
+    "search_members": (),
+    "list_members": (),
+    "get_user": (),
+    "edit_member": _edit_member,
+    "bulk_ban": ("ban_members",),
+    "get_ban": ("ban_members",),
+    "prune_members": ("kick_members",),
+    "set_bot_nickname": ("manage_nicknames",),
+    # Roles
+    "reorder_roles": ("manage_roles",),
+    "get_role_member_counts": (),
+    "get_role": (),
+    "list_role_members": (),
+    # Server settings
+    "edit_server": ("manage_guild",),
+    "get_welcome_screen": ("manage_guild",),
+    "edit_welcome_screen": ("manage_guild",),
+    "get_onboarding": ("manage_guild",),
+    "edit_onboarding": ("manage_guild", "manage_roles"),
+    "set_incident_actions": ("manage_guild",),
+    "get_widget": ("manage_guild",),
+    "edit_widget": ("manage_guild",),
+    "get_vanity_url": ("manage_guild",),
+    "list_integrations": ("manage_guild",),
+    "delete_integration": ("manage_guild",),
+    "list_voice_regions": (),
+    "list_guild_templates": ("manage_guild",),
+    "create_guild_template": ("manage_guild",),
+    "sync_guild_template": ("manage_guild",),
+    "edit_guild_template": ("manage_guild",),
+    "delete_guild_template": ("manage_guild",),
+    "get_audit_log": ("view_audit_log",),
+    # AutoMod
+    "list_automod_rules": ("manage_guild",),
+    "get_automod_rule": ("manage_guild",),
+    "create_automod_rule": ("manage_guild",),
+    "edit_automod_rule": ("manage_guild",),
+    "delete_automod_rule": ("manage_guild",),
+    # Events
+    "get_guild_scheduled_event": (),
+    # Webhooks
+    "get_webhook": ("manage_webhooks",),
+    "edit_webhook": ("manage_webhooks",),
+    "list_guild_webhooks": ("manage_webhooks",),
+    "get_webhook_message": ("manage_webhooks",),
+    "edit_webhook_message": ("manage_webhooks",),
+    "delete_webhook_message": ("manage_webhooks",),
+    # Expressions: stickers and soundboard
+    "list_guild_stickers": (),
+    "get_guild_sticker": (),
+    "list_sticker_packs": (),
+    "create_guild_sticker": ("manage_expressions",),
+    "edit_guild_sticker": ("manage_expressions",),
+    "delete_guild_sticker": ("manage_expressions",),
+    "list_guild_sounds": (),
+    "get_guild_sound": (),
+    "list_default_sounds": (),
+    "create_guild_sound": ("manage_expressions",),
+    "edit_guild_sound": ("manage_expressions",),
+    "delete_guild_sound": ("manage_expressions",),
+    # Application emojis belong to the bot's application, not this server: administrators only.
+    "list_app_emojis": (),
+    "create_app_emoji": ("administrator",),
+    "delete_app_emoji": ("administrator",),
 }
 UNKNOWN_TOOL_PERMISSIONS = ("administrator",)
 
@@ -107,16 +249,27 @@ UNKNOWN_TOOL_PERMISSIONS = ("administrator",)
 MEMBER_TARGET_TOOLS = {
     "kick_member", "ban_member", "timeout_member", "remove_timeout", "set_nickname",
     "assign_role", "remove_role", "move_member", "disconnect_member", "modify_voice_state",
-    "upsert_member_channel_permissions",
+    "upsert_member_channel_permissions", "edit_member", "bulk_ban",
 }
 # Tools whose target role must be below the requester's top role.
 ROLE_TARGET_TOOLS = {
     "edit_role", "delete_role", "assign_role", "remove_role", "upsert_role_channel_permissions",
+    "edit_member", "create_role_menu", "reorder_roles", "prune_members",
 }
+# Tools that grant permissions: the requester can't hand out permissions they don't hold themselves.
+# Maps tool -> argument names carrying the permissions (a numeric bitfield or comma-separated names).
+GRANTING_TOOLS = {
+    "create_role": ("permissions",),
+    "edit_role": ("permissions",),
+    "upsert_role_channel_permissions": ("allowRaw", "allowPermissions"),
+    "upsert_member_channel_permissions": ("allowRaw", "allowPermissions"),
+}
+# Guild-wide reads that could expose channels the requester can't see: a channel must be given.
+CHANNEL_REQUIRED_TOOLS = {"search_messages"}
 # Tools that post content; mass pings are gated behind mention_everyone.
 POSTING_TOOLS = {
     "send_message", "edit_message", "send_webhook_message", "send_private_message",
-    "edit_private_message", "create_forum_post",
+    "edit_private_message", "create_forum_post", "edit_webhook_message", "create_role_menu",
 }
 
 # Every interactive guild permission worth telling the model about.
@@ -124,21 +277,70 @@ SUMMARY_PERMISSIONS = (
     "administrator", "manage_guild", "manage_channels", "manage_roles", "manage_messages",
     "manage_webhooks", "manage_events", "manage_threads", "manage_nicknames", "manage_expressions",
     "kick_members", "ban_members", "moderate_members", "move_members", "mute_members",
-    "mention_everyone", "create_instant_invite",
+    "mention_everyone", "create_instant_invite", "view_audit_log",
 )
+
+
+def _as_ids(value: Any) -> list[int]:
+    """One ID, a comma-separated string of IDs, or a list of them."""
+    parts = value if isinstance(value, list) else str(value).split(",")
+    ids = []
+    for part in parts:
+        try:
+            ids.append(int(str(part).strip()))
+        except (TypeError, ValueError):
+            pass
+    return ids
 
 
 def _find_ids(args: dict[str, Any], *needles: str) -> list[int]:
     ids = []
     for key, value in args.items():
         k = key.lower()
-        if not k.endswith("id") or not any(n in k for n in needles):
+        if not (k.endswith("id") or k.endswith("ids")) or not any(n in k for n in needles):
             continue
-        try:
-            ids.append(int(str(value).strip()))
-        except (TypeError, ValueError):
-            pass
+        ids.extend(_as_ids(value))
     return ids
+
+
+def _json_entries(value: Any) -> list[dict]:
+    """A structured argument sent as a JSON string (or already a list): its dict entries."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return []
+    return [e for e in value if isinstance(e, dict)] if isinstance(value, list) else []
+
+
+def _role_ids(tool: str, args: dict[str, Any]) -> list[tuple[int, int | None]]:
+    """(role id, requested new position or None) for every role the call touches."""
+    found: list[tuple[int, int | None]] = [(rid, None) for rid in _find_ids(args, "role")]
+    for key, id_keys in (("roles", ("roleId", "id")), ("positionsJson", ("id", "roleId"))):
+        for entry in _json_entries(args.get(key)):
+            for id_key in id_keys:
+                ids = _as_ids(entry.get(id_key)) if id_key in entry else []
+                if ids:
+                    pos = entry.get("position")
+                    found.append((ids[0], pos if isinstance(pos, int) else None))
+                    break
+    return found
+
+
+def _granted_permissions(raw: Any) -> discord.Permissions | None:
+    """Parse a numeric bitfield or 'ViewChannel, SendMessages' style names. None if unparseable."""
+    text = str(raw).strip()
+    if not text:
+        return discord.Permissions.none()
+    if text.isdigit():
+        return discord.Permissions(int(text))
+    perms = discord.Permissions.none()
+    for name in (n for n in text.split(",") if n.strip()):
+        flag = re.sub(r"(?<!^)(?=[A-Z])", "_", name.strip()).lower()  # ManageRoles -> manage_roles
+        if flag not in discord.Permissions.VALID_FLAGS:
+            return None
+        setattr(perms, flag, True)
+    return perms
 
 
 def _strings(value: Any) -> list[str]:
@@ -171,23 +373,28 @@ async def check_tool_permission(
     tool: str,
     args: dict[str, Any],
     author: discord.Member,
-    owner_ids: frozenset[int],
+    owner_ids: frozenset[int] = frozenset(),
     required: tuple[str, ...] | None = None,
 ) -> str | None:
     """Return None if allowed, otherwise a human-readable reason for the denial.
 
-    `required` overrides the TOOL_PERMISSIONS lookup (used for tools from extra MCP servers).
+    `owner_ids` (the bot's owners) bypass every check. `required` overrides the TOOL_PERMISSIONS lookup
+    (used for tools from extra MCP servers).
     """
     if author.id in owner_ids:
         return None
-
     guild = author.guild
     is_guild_owner = guild.owner_id == author.id
     if required is None:
         required = TOOL_PERMISSIONS.get(tool, UNKNOWN_TOOL_PERMISSIONS)
+        if callable(required):
+            required = required(args)
 
     # Channel-scoped check: channel overwrites can grant or deny per channel.
     channel_ids = _find_ids(args, "channel", "thread", "post")
+    if (tool in CHANNEL_REQUIRED_TOOLS and not channel_ids and not is_guild_owner
+            and not author.guild_permissions.administrator):
+        return "name a channel to search (server-wide searches could expose channels you can't see)"
     if channel_ids:
         for cid in channel_ids:
             channel = guild.get_channel_or_thread(cid)
@@ -226,14 +433,28 @@ async def check_tool_permission(
                 return f"{target.display_name}'s highest role is not below yours"
 
     if tool in ROLE_TARGET_TOOLS:
-        for rid in _find_ids(args, "role"):
+        for rid, new_position in _role_ids(tool, args):
             role = guild.get_role(rid)
             if role is not None and role >= author.top_role:
                 return f"role @{role.name} is not below your highest role"
+            if new_position is not None and new_position >= author.top_role.position:
+                return "you can't move a role to or above your own highest role"
+
+    for arg in GRANTING_TOOLS.get(tool, ()):
+        if not _present(args, arg) or author.guild_permissions.administrator:
+            continue
+        granted = _granted_permissions(args[arg])
+        if granted is None:
+            return f"couldn't read the permissions in {arg}, so the bot won't apply them for you"
+        extra = [name for name, on in granted if on and not getattr(author.guild_permissions, name, False)]
+        if extra:
+            return f"you can't grant permissions you don't have yourself ({', '.join(extra)})"
 
     if tool in POSTING_TOOLS:
         text = " ".join(_strings(args))
         if ("@everyone" in text or "@here" in text or "<@&" in text) and not author.guild_permissions.mention_everyone:
             return "you lack mention_everyone, so the bot won't post @everyone/@here/role pings for you"
+        if str(args.get("allowedMentions", "")).lower() in ("all", "users_roles") and not author.guild_permissions.mention_everyone:
+            return "you lack mention_everyone, so the bot can't allow role or @everyone mentions for you"
 
     return None

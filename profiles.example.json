@@ -1,0 +1,20 @@
+{
+  "default": {
+    "persona": "You are the friendly helper for the Acme community. Keep answers short and upbeat."
+  },
+  "servers": {
+    "123456789012345678": {
+      "nickname": "Acme Bot",
+      "avatar": "profiles/acme/avatar.png",
+      "banner": "profiles/acme/banner.png",
+      "bio": "Acme's assistant. @mention me!",
+      "admins_only": true
+    },
+    "234567890123456789": {
+      "nickname": "Acme Games",
+      "avatar": "https://example.com/acme-games.png",
+      "persona_file": "profiles/acme-games/persona.md",
+      "allowed_role_ids": ["345678901234567890"]
+    }
+  }
+}

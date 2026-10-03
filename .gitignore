@@ -2,3 +2,6 @@
 __pycache__/
 .venv/
 .claude/
+profiles.json
+.profile-state.json
+.pytest_cache/

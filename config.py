@@ -66,6 +66,7 @@ def load_mcp_servers(path: str) -> tuple[list[dict], list[str]]:
 class Config:
     discord_token: str
     mcp_url: str
+    mcp_socket: str  # Unix socket path for discord-mcp; empty means connect to mcp_url over TCP
 
     llm_base_url: str
     llm_api_key: str
@@ -80,6 +81,7 @@ class Config:
     tool_timeout: float
 
     owner_ids: frozenset[int]
+    admins_only: bool
     allowed_role_ids: frozenset[int]
     disabled_tools: frozenset[str]
     user_cooldown: float
@@ -89,19 +91,23 @@ class Config:
     mcp_servers: tuple[dict, ...]
     mcp_servers_skipped: tuple[str, ...]
 
+    profiles_file: str | None
+    profile_state_file: str | None
+
 
 def load_config() -> Config:
     token = os.getenv("DISCORD_TOKEN")
     if not token:
         raise SystemExit("DISCORD_TOKEN is not set (see .env.example)")
     # Relative paths are relative to the bot's directory, not the working directory.
-    servers_file = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                os.getenv("MCP_SERVERS_FILE") or "mcp_servers.json")
+    here = os.path.dirname(os.path.abspath(__file__))
+    servers_file = os.path.join(here, os.getenv("MCP_SERVERS_FILE") or "mcp_servers.json")
     servers, skipped = load_mcp_servers(servers_file)
 
     return Config(
         discord_token=token,
         mcp_url=os.getenv("MCP_URL", "http://localhost:8085/mcp"),
+        mcp_socket=os.getenv("MCP_SOCKET", ""),
         llm_base_url=os.getenv("LLM_BASE_URL", "http://localhost:11434/v1"),
         llm_api_key=os.getenv("LLM_API_KEY", "ollama"),
         llm_model=os.getenv("LLM_MODEL", "qwen3:14b"),
@@ -113,6 +119,7 @@ def load_config() -> Config:
         tool_result_max_chars=int(os.getenv("TOOL_RESULT_MAX_CHARS", "6000")),
         tool_timeout=float(os.getenv("TOOL_TIMEOUT", "60")),
         owner_ids=_ids("OWNER_IDS"),
+        admins_only=_bool("ADMINS_ONLY", False),
         allowed_role_ids=_ids("ALLOWED_ROLE_IDS"),
         disabled_tools=_names("DISABLED_TOOLS"),
         user_cooldown=float(os.getenv("USER_COOLDOWN", "3")),
@@ -120,4 +127,6 @@ def load_config() -> Config:
         members_intent=_bool("MEMBERS_INTENT", False),
         mcp_servers=tuple(servers),
         mcp_servers_skipped=tuple(skipped),
+        profiles_file=os.path.join(here, os.getenv("PROFILES_FILE") or "profiles.json"),
+        profile_state_file=os.getenv("PROFILE_STATE_FILE") or None,
     )

@@ -1,13 +1,12 @@
 services:
   discord-mcp:
-    image: saseq/discord-mcp:latest
+    build: https://github.com/willuhmjs/discord-mcp.git#main
     restart: unless-stopped
     environment:
-      SPRING_PROFILES_ACTIVE: http
       DISCORD_TOKEN: ${DISCORD_TOKEN}
       DISCORD_GUILD_ID: ${DISCORD_GUILD_ID:-}
-    ports:
-      - "8085:8085"
+      ENABLE_MEMBERS_INTENT: ${MEMBERS_INTENT:-false}
+    # No published ports: only the bot container needs to reach it, and its endpoint has no auth.
 
   smartbot:
     build: .
@@ -17,6 +16,10 @@ services:
       MCP_URL: http://discord-mcp:8085/mcp
       # If Qwen runs on the host via Ollama, reach it from the container like this:
       LLM_BASE_URL: ${LLM_BASE_URL_DOCKER:-http://host.docker.internal:11434/v1}
+    # Per-server profiles: put profiles.json and its images in ./profiles and uncomment
+    # volumes:
+    #   - ./profiles:/profiles:ro
+    # with PROFILES_FILE=/profiles/profiles.json and PROFILE_STATE_FILE=/tmp/profile-state.json in .env
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

@@ -7,6 +7,8 @@ reconnects (or relaunches the subprocess) automatically if the server goes away.
 """
 
 import asyncio
+import contextlib
+import inspect
 import json
 import logging
 from typing import Any
@@ -19,7 +21,29 @@ try:
 except ImportError:  # newer SDK naming
     from mcp.client.streamable_http import streamable_http_client as _http_client
 
+try:
+    import httpx2 as httpx  # mcp 2.x
+except ImportError:
+    import httpx
+
 log = logging.getLogger("smartbot.mcp")
+
+
+@contextlib.asynccontextmanager
+async def _http_over_socket(url: str, socket_path: str):
+    """Streamable HTTP through a Unix socket. discord-mcp listens on one that only the owning user can
+    reach (see service.sh), so no other account on the machine can use its tools."""
+    def make_client(headers=None, timeout=None, auth=None):
+        return httpx.AsyncClient(
+            transport=httpx.AsyncHTTPTransport(uds=socket_path), headers=headers,
+            timeout=timeout or httpx.Timeout(30.0, read=300.0), auth=auth, follow_redirects=True)
+
+    if "http_client" in inspect.signature(_http_client).parameters:  # mcp 2.x takes a ready client
+        async with make_client() as client, _http_client(url, http_client=client) as streams:
+            yield streams
+    else:  # mcp 1.x takes a factory
+        async with _http_client(url, httpx_client_factory=make_client) as streams:
+            yield streams
 
 
 def _field(obj: Any, snake: str, camel: str) -> Any:
@@ -29,11 +53,13 @@ def _field(obj: Any, snake: str, camel: str) -> Any:
 
 class McpClient:
     def __init__(self, name: str, *, url: str | None = None, command: str | None = None,
-                 args: list[str] | None = None, env: dict[str, str] | None = None, timeout: float = 60.0):
+                 args: list[str] | None = None, env: dict[str, str] | None = None, timeout: float = 60.0,
+                 socket_path: str | None = None):
         if not url and not command:
             raise ValueError(f"MCP server {name!r} needs a url or a command")
         self.name = name
         self.url = url
+        self.socket_path = socket_path  # connect to `url` through this Unix socket instead of TCP
         # Only a minimal environment (PATH, HOME, ...) plus the configured vars, so secrets like
         # DISCORD_TOKEN never reach third-party servers.
         self.stdio = None if url else StdioServerParameters(
@@ -57,7 +83,11 @@ class McpClient:
             log.warning("MCP server %s not reachable yet; will keep retrying", self.name)
 
     def _transport(self):
-        return _http_client(self.url) if self.url else stdio_client(self.stdio)
+        if not self.url:
+            return stdio_client(self.stdio)
+        if self.socket_path:
+            return _http_over_socket(self.url, self.socket_path)
+        return _http_client(self.url)
 
     async def stop(self) -> None:
         self._stopping = True
