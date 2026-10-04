@@ -15,9 +15,10 @@ from config import Config, load_config
 from controls import LOCAL_TOOLS, Controls
 from mcp_client import McpClient
 from moderation import Moderator
-from permissions import (TOOL_PERMISSIONS, check_tool_permission, effective_permissions, permission_summary,
+from permissions import (TOOL_PERMISSIONS, is_staff, check_tool_permission, effective_permissions, permission_summary,
                          tool_allowed)
 from profiles import Profiles
+from ratelimit import RateLimiter
 from store import Store
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -74,6 +75,14 @@ exactly {no_reply}.
 things by name or link. Don't dump raw JSON or IDs unless they were asked for.
 - Answer normal questions and chat directly. Not everything needs a tool.
 {persona}"""
+
+MEMBER_NOTE = """
+
+## This requester
+They aren't server staff, so you have no tools for them: no Discord actions and no web search. Chat and \
+answer from what you know and the conversation. If they ask you to do something in the server, tell them \
+that only staff can have you do that.
+"""
 
 PERSONA_SECTION = """
 ## Persona in this server
@@ -192,6 +201,7 @@ class SmartBot(discord.Client):
         )
         self._channel_locks: dict[int, asyncio.Lock] = {}
         self._last_use: dict[int, float] = {}
+        self.ratelimit = RateLimiter()
         self._tools_cache: tuple[int, list[dict], set[str]] | None = None
         # Per-server settings and identity: PROFILES_FILE, plus changes made from Discord.
         self.store = Store(cfg.database_file)
@@ -341,7 +351,7 @@ class SmartBot(discord.Client):
             reply = f" (replying to {m.reference.resolved.author.display_name})"
         return f"[{_fmt_time(m.created_at)}] {who}{reply} [msg {m.id}]: {content}"
 
-    async def _build_messages(self, message: discord.Message) -> list[dict]:
+    async def _build_messages(self, message: discord.Message, minimal: bool = False) -> list[dict]:
         guild, channel, author = message.guild, message.channel, message.author
 
         channel_extra = ""
@@ -362,13 +372,16 @@ class SmartBot(discord.Client):
             author_perms=permission_summary(author), no_reply=NO_REPLY,
             persona=PERSONA_SECTION.format(text=persona) if (persona := self.profiles.persona(guild.id)) else "",
         )
+        if minimal:
+            system += MEMBER_NOTE
         messages: list[dict] = [{"role": "system", "content": system}]
 
         # Recent channel history gives the agent conversational memory, even across restarts.
         history: list[discord.Message] = []
-        if self.cfg.history_limit > 0:
+        history_limit = min(self.cfg.history_limit, 8) if minimal else self.cfg.history_limit
+        if history_limit > 0:
             try:
-                history = [m async for m in channel.history(limit=self.cfg.history_limit, before=message)]
+                history = [m async for m in channel.history(limit=history_limit, before=message)]
                 history.reverse()
             except discord.HTTPException:
                 pass
@@ -410,7 +423,7 @@ class SmartBot(discord.Client):
             body += "\n\n" + "\n".join(notes)
 
         images = [a.url for a in message.attachments if (a.content_type or "").startswith("image/")]
-        if self.cfg.vision and images:
+        if self.cfg.vision and images and not minimal:
             content = [{"type": "text", "text": body}] + [
                 {"type": "image_url", "image_url": {"url": u}} for u in images[:4]
             ]
@@ -456,27 +469,52 @@ class SmartBot(discord.Client):
         if not is_owner and allowed_roles and not any(r.id in allowed_roles for r in author.roles):
             return
 
+        staff = is_staff(author, self.cfg.owner_ids)
         now = time.monotonic()
         if now - self._last_use.get(author.id, 0) < self.cfg.user_cooldown and not is_owner:
-            await message.add_reaction("⏳")
+            if staff:
+                await message.add_reaction("⏳")
             return
         self._last_use[author.id] = now
+        if not staff and await self._rate_limited(message):
+            return
 
         lock = self._channel_locks.setdefault(message.channel.id, asyncio.Lock())
         async with lock:
-            await self._handle(message)
+            await self._handle(message, minimal=not staff and self.profiles.get(message.guild.id, "tools") == "staff")
 
-    async def _handle(self, message: discord.Message) -> None:
-        if not self.mcp.tools:
+    async def _rate_limited(self, message: discord.Message) -> bool:
+        gid, uid = message.guild.id, message.author.id
+        get = self.profiles.get
+        wait = self.ratelimit.check(gid, uid, get(gid, "member_per_minute"), get(gid, "member_per_hour"),
+                                    get(gid, "member_server_per_hour"))
+        if not wait:
+            return False
+        log.info("RATE LIMITED %s (%s) in %s for %ds", message.author, uid, message.guild.name, wait)
+        if self.ratelimit.should_notify(gid, uid, wait):
+            minutes = max(1, round(wait / 60))
+            try:
+                await message.reply(f"I'm getting a lot of requests; try again in about {minutes} minute(s).",
+                                    mention_author=False, delete_after=15)
+            except discord.HTTPException:
+                pass
+        return True
+
+    async def _handle(self, message: discord.Message, minimal: bool = False) -> None:
+        if minimal:
+            tools: list[dict] = []
+            guild_params: set[str] = set()
+        elif not self.mcp.tools:
             await message.reply("My Discord tools aren't connected right now (is discord-mcp running?).",
                                 mention_author=False)
             return
-        tools, guild_params = self._tools_for(message.author)
+        else:
+            tools, guild_params = self._tools_for(message.author)
         offered = {t["function"]["name"] for t in tools}
         model = self.profiles.get(message.guild.id, "model") or None
         try:
             async with message.channel.typing():
-                messages = await self._build_messages(message)
+                messages = await self._build_messages(message, minimal)
                 result = await self.agent.run(messages, tools, self._make_executor(message, guild_params, offered),
                                               model=model)
         except Exception:

@@ -86,6 +86,14 @@ alerts), the mod log channel, and strikes (expiry, escalation to timeout/kick/ba
 **Manage Messages**; an escalation step that bans needs **Ban Members**. Someone with only Manage Server can't
 set up the bot to do what they couldn't do themselves.
 
+### Staff-only tools and member rate limits
+With `tools` set to `staff`, anyone allowed by `access` can chat with the bot, but only members holding a
+moderation or management permission (Manage Messages, Moderate Members, Manage Server, ...) get tools. Everyone
+else gets a minimal mode: no Discord tools, no web search, no image reading, and a shorter history. Members who
+aren't staff are also rate limited: `member_per_minute` (4), `member_per_hour` (30), and
+`member_server_per_hour` (150, all of them together). Someone who hits a limit gets one notice that deletes
+itself, and is then ignored until the window passes.
+
 ### Automod
 With `automod` on, each message in a watched channel goes to `automod_model` (`AUTOMOD_MODEL`; gpt-oss-120b
 works well) with the rules and the previous few messages. It answers with a rule and a severity, and

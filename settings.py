@@ -14,6 +14,7 @@ from typing import Any, Callable
 import discord
 
 ACCESS_MODES = ("everyone", "manage_guild", "administrator")
+TOOL_MODES = ("everyone", "staff")
 TIERS = ("low", "medium", "high")
 TIER_ACTIONS = ("none", "log", "delete_warn")
 ESCALATION_ACTIONS = ("timeout", "kick", "ban")
@@ -83,6 +84,16 @@ SETTINGS: dict[str, Setting] = {s.key: s for s in [
             choices=ACCESS_MODES),
     Setting("allowed_role_ids", "access", "roles", "If set, only members with one of these roles can use me"),
     Setting("admins_only", "access", "bool", "Old form of access=administrator (profiles file only)", editable=False),
+    Setting("tools", "access", "choice",
+            "Who gets my tools: everyone (each limited to their own permissions), or staff only (members with a "
+            "moderation or management permission); everyone else can only chat, without web search or images",
+            default="everyone", choices=TOOL_MODES),
+    Setting("member_per_minute", "access", "int", "Requests a non-staff member can make per minute (0: no limit)",
+            default=4, min=0, max=60),
+    Setting("member_per_hour", "access", "int", "Requests a non-staff member can make per hour (0: no limit)",
+            default=30, min=0, max=1000),
+    Setting("member_server_per_hour", "access", "int",
+            "Requests all non-staff members together can make per hour (0: no limit)", default=150, min=0, max=10000),
     # Models
     Setting("model", "models", "model", "The model that answers when I'm @mentioned"),
     Setting("automod_model", "models", "model", "The model that checks messages for automod"),

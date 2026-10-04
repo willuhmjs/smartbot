@@ -45,10 +45,11 @@ def handled(b, msg, monkeypatch):
     monkeypatch.setattr(b, "_is_triggered", lambda m: True)
     monkeypatch.setattr(bot.discord, "Member", FakeMember)
 
-    async def fake_handle(m):
+    async def fake_handle(m, minimal=False):
         seen.append(m)
     monkeypatch.setattr(b, "_handle", fake_handle)
     msg.channel = SimpleNamespace(id=1)
+    msg.author.guild = msg.guild
     asyncio.run(b.on_message(msg))
     return bool(seen)
 

@@ -245,6 +245,21 @@ TOOL_PERMISSIONS: dict[str, tuple[str, ...] | Callable[[dict[str, Any]], tuple[s
 }
 UNKNOWN_TOOL_PERMISSIONS = ("administrator",)
 
+# Holding any of these server-wide makes a member staff: they get tools (limited to their permissions) and
+# no member rate limits.
+STAFF_PERMISSIONS = (
+    "administrator", "manage_guild", "manage_channels", "manage_roles", "manage_messages", "moderate_members",
+    "kick_members", "ban_members", "manage_nicknames", "manage_events", "manage_threads", "manage_webhooks",
+    "manage_expressions", "view_audit_log",
+)
+
+
+def is_staff(member: discord.Member, owner_ids: frozenset[int] = frozenset()) -> bool:
+    if member.id in owner_ids or member.id == member.guild.owner_id:
+        return True
+    perms = member.guild_permissions
+    return any(getattr(perms, p, False) for p in STAFF_PERMISSIONS)
+
 # Tools whose target member must be below the requester in the role hierarchy.
 MEMBER_TARGET_TOOLS = {
     "kick_member", "ban_member", "timeout_member", "remove_timeout", "set_nickname",

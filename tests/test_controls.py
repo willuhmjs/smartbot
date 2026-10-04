@@ -121,3 +121,53 @@ def test_parse():
                      ("model", "nope")]:
         with pytest.raises(SettingError):
             parse(key, bad, models=["gpt-oss-120b"])
+
+
+def test_rate_limits_for_members():
+    from ratelimit import RateLimiter
+    r = RateLimiter()
+    assert all(r.check(1, 5, 4, 30, 150, now=i) == 0 for i in range(4))
+    wait = r.check(1, 5, 4, 30, 150, now=10)
+    assert 49 <= wait <= 51                                    # the first of the four leaves the window at 60s
+    assert r.should_notify(1, 5, wait, now=10) and not r.should_notify(1, 5, wait, now=20)
+    assert r.check(1, 6, 4, 30, 150, now=10) == 0             # others aren't affected
+    assert r.check(1, 5, 4, 30, 150, now=61) == 0
+    for i in range(30):                                        # hour limit, spread out
+        r.check(2, 5, 4, 30, 150, now=i * 61)
+    assert r.check(2, 5, 4, 30, 150, now=30 * 61) > 0
+    assert r.check(3, 5, 0, 0, 0, now=0) == 0                 # 0 = no limit
+    for uid in range(150):                                     # many accounts together
+        r.check(4, uid, 4, 30, 150, now=uid)
+    assert r.check(4, 999, 4, 30, 150, now=200) > 0
+
+
+def test_non_staff_get_no_tools_in_staff_mode(tmp_path, monkeypatch):
+    from permissions import is_staff
+    b = make_bot(tmp_path, monkeypatch, {"default": {"tools": "staff"}}, OWNER_IDS="7")
+    b.profiles.reload_if_changed()
+    assert not is_staff(member(send_messages=True)) and is_staff(member(manage_messages=True))
+    assert is_staff(member(uid=7), frozenset({7}))
+    seen = {}
+
+    async def run(messages, tools, execute, model=None):
+        seen["tools"], seen["system"] = tools, messages[0]["content"]
+        seen["refused"] = await execute("searxng_web_search", {"query": "x"})
+        return SimpleNamespace(text="hi", tools_used=[])
+
+    async def build(message, minimal=False):
+        return [{"role": "system", "content": "minimal" if minimal else "full"}]
+    monkeypatch.setattr(b.agent, "run", run)
+    monkeypatch.setattr(b, "_build_messages", build)
+
+    async def reply(message, text):
+        seen["reply"] = text
+    monkeypatch.setattr(b, "_send_reply", reply)
+
+    class Typing:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+    m = member(send_messages=True)
+    msg = SimpleNamespace(author=m, guild=m.guild, id=1, channel=SimpleNamespace(typing=Typing, mention="#c"))
+    asyncio.run(b._handle(msg, minimal=True))
+    assert seen["tools"] == [] and seen["system"] == "minimal"
+    assert seen["refused"].startswith("ERROR: unknown tool")
