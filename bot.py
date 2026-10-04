@@ -530,6 +530,14 @@ class SmartBot(discord.Client):
         if not staff and await self._rate_limited(message):
             return
 
+        mine = message.channel.permissions_for(message.guild.me)
+        can_post = mine.send_messages_in_threads if isinstance(message.channel, discord.Thread) else mine.send_messages
+        if not (can_post and mine.read_message_history):
+            # Don't spend a model call on a reply Discord will refuse.
+            log.warning("Can't reply in #%s in %s: missing Send Messages or Read Message History there",
+                        getattr(message.channel, "name", message.channel.id), message.guild.name)
+            return
+
         lock = self._channel_locks.setdefault(message.channel.id, asyncio.Lock())
         async with lock:
             await self._handle(message, minimal=not staff and self.profiles.get(message.guild.id, "tools") == "staff")

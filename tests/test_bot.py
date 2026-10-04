@@ -23,7 +23,7 @@ def make_bot(tmp_path, monkeypatch, profiles, **env):
 
 class Msg:
     def __init__(self, gid, author, owner_id=999):
-        self.guild = SimpleNamespace(id=gid, owner_id=owner_id)
+        self.guild = SimpleNamespace(id=gid, owner_id=owner_id, me=None, name="g")
         self.author = author
         self.replies = []
 
@@ -40,7 +40,7 @@ def member(uid, admin=False, roles=(), manage_guild=False):
                       roles=[SimpleNamespace(id=r) for r in roles])
 
 
-def handled(b, msg, monkeypatch):
+def handled(b, msg, monkeypatch, perms=None):
     seen = []
     monkeypatch.setattr(b, "_is_triggered", lambda m: True)
     monkeypatch.setattr(bot.discord, "Member", FakeMember)
@@ -48,7 +48,7 @@ def handled(b, msg, monkeypatch):
     async def fake_handle(m, minimal=False):
         seen.append(m)
     monkeypatch.setattr(b, "_handle", fake_handle)
-    msg.channel = SimpleNamespace(id=1)
+    msg.channel = SimpleNamespace(id=1, permissions_for=lambda m: perms or bot.discord.Permissions.text())
     msg.author.guild = msg.guild
     asyncio.run(b.on_message(msg))
     return bool(seen)
@@ -91,3 +91,10 @@ def test_access_manage_guild(tmp_path, monkeypatch):
     assert not handled(b, msg, monkeypatch) and "Manage Server" in msg.replies[0]
     assert handled(b, Msg(1, member(11, manage_guild=True)), monkeypatch)
     assert handled(b, Msg(1, member(12, admin=True)), monkeypatch)
+
+
+def test_no_model_call_where_it_cannot_reply(tmp_path, monkeypatch):
+    b = make_bot(tmp_path, monkeypatch, {}, USER_COOLDOWN="0")
+    no_send = bot.discord.Permissions(view_channel=True, read_message_history=True)
+    assert not handled(b, Msg(1, member(10)), monkeypatch, perms=no_send)
+    assert handled(b, Msg(1, member(10)), monkeypatch)
