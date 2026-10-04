@@ -202,4 +202,4 @@ def test_chat_only_has_no_tools_commands_or_moderation(tmp_path, monkeypatch):
     assert seen["refused"].startswith("ERROR: unknown tool")
     text = bot.CHAT_PROMPT.format(bot_name="B", bot_id=1, now="n", guild_name="G", channel_name="c", channel_extra="",
                                   author_name="a", author_username="a", author_id=4, persona="")
-    assert "no tools" in text
+    assert "can't take actions in Discord" in text
