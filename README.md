@@ -161,7 +161,7 @@ network, add it to `DISABLED_TOOLS` or give searxng `"permissions": ["administra
 - **Access**: `OWNER_IDS` bypass the permission checks (not the one-server rule). `ACCESS` is `everyone`, `manage_guild` or `administrator`
   (the server owner always qualifies); `ALLOWED_ROLE_IDS` limits the bot to members with one of those roles.
   Both can be set per server.
-- One request at a time per channel, a per-user cooldown, and long replies split across messages.
+- One request at a time per channel and a per-user cooldown. A reply longer than five sentences or one message goes in a thread on the question (with Create Public Threads; otherwise in the channel), split across messages as needed.
 
 ## Tests
 ```bash

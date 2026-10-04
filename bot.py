@@ -4,6 +4,7 @@ CHAT_ONLY, just chats)."""
 import asyncio
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -27,6 +28,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("smartbot")
 
 NO_REPLY = "NO_REPLY"
+THREAD_SENTENCES = 5  # longer replies go in a thread on the requester's message
 
 SYSTEM_PROMPT = """You are {bot_name}, an AI assistant that lives in the Discord server "{guild_name}". \
 People @mention you to ask questions or get things done in the server. You have tools that act on \
@@ -60,7 +62,8 @@ the image attached to their message.
 - Destructive or hard-to-undo actions (deleting channels, roles or messages; bans; kicks; mass \
 changes): go ahead if the request is clear and specific. If it's ambiguous (for example, which of \
 two channels called "general"?), ask first.
-- Your final text is posted automatically as a reply to the requester's message. Don't use \
+- Your final text is posted automatically as a reply to the requester's message (a long one goes in a \
+thread on it). Don't use \
 send_message to reply in the current channel. Only use it to post somewhere else, or when explicitly asked.
 - To ping someone, use <@USER_ID>. To link a channel, use <#CHANNEL_ID>.
 - Messages can carry more than text. send_message takes embedsJson (cards), componentsJson (buttons and \
@@ -91,7 +94,7 @@ server), so if someone asks for that, say it's not something you do here. Say so
 
 ## Style
 - Be concise and natural. Use Discord markdown where it helps, and fenced code blocks with a language for code.
-- Your reply is posted automatically as a reply to the requester's message.
+- Your reply is posted automatically as a reply to the requester's message (a long one goes in a thread on it).
 - To ping someone, use <@USER_ID>.
 {persona}"""
 
@@ -134,6 +137,20 @@ def split_message(text: str, limit: int = 2000) -> list[str]:
     if text.strip():
         chunks.append(text)
     return chunks
+
+
+def count_sentences(text: str) -> int:
+    """Roughly how many sentences text has. Code blocks and -# subtext don't count; a line with no ending
+    punctuation (a list item, a heading) counts as one."""
+    text = re.sub(r"```.*?(```|$)", "", text, flags=re.S)
+    count = 0
+    for line in text.splitlines():
+        line = line.strip()
+        if not re.search(r"\w", line) or line.startswith("-#"):
+            continue
+        line = re.sub(r"^(\d+[.)]|[-*>]|#+)\s+", "", line)  # list markers and headings aren't sentence ends
+        count += max(1, len(re.findall(r"[.!?]+(?=\s|$)", line)))
+    return count
 
 
 def _fmt_time(dt: datetime) -> str:
@@ -429,8 +446,24 @@ class SmartBot(discord.Client):
                     break
             chain.append(ref)
             current = ref
+        if current.author.id == self.user.id and not current.reference and len(chain) < limit:
+            # A long reply opens a thread on the question; the question is the thread's starter message.
+            starter = await self._thread_starter(message.channel)
+            if starter is not None:
+                chain.append(starter)
         chain.reverse()
         return chain
+
+    async def _thread_starter(self, channel: Any) -> discord.Message | None:
+        """The message a thread was opened on (it's in the parent channel), or None."""
+        if not isinstance(channel, discord.Thread) or not isinstance(channel.parent, discord.TextChannel):
+            return None
+        if channel.starter_message is not None:
+            return channel.starter_message
+        try:
+            return await channel.parent.fetch_message(channel.id)  # a thread on a message shares its id
+        except discord.HTTPException:
+            return None
 
     async def _build_messages(self, message: discord.Message, minimal: bool = False) -> list[dict]:
         guild, channel, author = message.guild, message.channel, message.author
@@ -485,6 +518,8 @@ class SmartBot(discord.Client):
                     history.reverse()
                 except discord.HTTPException:
                     pass
+                if len(history) < history_limit and (starter := await self._thread_starter(channel)) is not None:
+                    history.insert(0, starter)  # the thread's start is in range, and with it the question
             if isinstance(ref, discord.Message) and all(m.id != ref.id for m in history):
                 history.insert(0, ref)
             if history:
@@ -635,7 +670,18 @@ class SmartBot(discord.Client):
         await self._send_reply(message, text)
 
     async def _send_reply(self, message: discord.Message, text: str) -> None:
-        for i, chunk in enumerate(split_message(text)):
+        chunks = split_message(text)
+        if len(chunks) > 1 or count_sentences(text) > THREAD_SENTENCES:
+            thread = await self._open_thread(message)
+            if thread is not None:
+                for chunk in chunks:
+                    try:
+                        await thread.send(chunk)
+                    except discord.HTTPException:
+                        log.exception("Could not send reply in thread %s", thread.id)
+                        return
+                return
+        for i, chunk in enumerate(chunks):
             try:
                 if i == 0:
                     await message.reply(chunk, mention_author=False)
@@ -648,6 +694,25 @@ class SmartBot(discord.Client):
                 except discord.HTTPException:
                     log.exception("Could not send reply in #%s", message.channel)
                     return
+
+    async def _open_thread(self, message: discord.Message) -> discord.Thread | None:
+        """A thread on the requester's message for a long reply, or None where there can't be one (already in a
+        thread or forum post, voice chat, no permission), in which case the reply goes in the channel."""
+        channel = message.channel
+        if not isinstance(channel, discord.TextChannel):  # announcement channels too; not threads or voice chat
+            return None
+        mine = channel.permissions_for(message.guild.me)
+        if not (mine.create_public_threads and mine.send_messages_in_threads):
+            return None
+        name = " ".join(re.sub(r"<[@#][!&]?\d+>", "", self._clean(message)).split())
+        if len(name) > 100:
+            name = name[:99] + "…"
+        try:
+            return await message.create_thread(name=name or f"Reply to {message.author.display_name}",
+                                               auto_archive_duration=1440)
+        except discord.HTTPException:
+            log.warning("Couldn't open a thread on message %s in #%s; replying in the channel", message.id, channel)
+            return None
 
 
 def main() -> None:

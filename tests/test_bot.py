@@ -138,3 +138,58 @@ def test_replies_mode_sends_only_the_reply_chain(tmp_path, monkeypatch):
     assert msgs[1]["content"] == "Will: who is william faircloth" and msgs[3]["content"] == "Bob: what does he do there"
     assert msgs[4]["content"] == "He runs the CS mirror." and "cool, thanks" in msgs[5]["content"]
     assert "replying to" not in msgs[5]["content"]
+
+
+def test_count_sentences():
+    assert bot.count_sentences("Sure! Here you go.") == 2
+    assert bot.count_sentences("1. First step\n2. Second step\n- a bullet") == 3
+    assert bot.count_sentences("One.\n```py\nx = 1. y = 2. z = 3.\n```\n-# 🔧 list_channels") == 1
+
+
+def test_long_replies_go_in_a_thread(tmp_path, monkeypatch):
+    b = make_bot(tmp_path, monkeypatch, {})
+    me = SimpleNamespace(id=42)
+    monkeypatch.setattr(type(b), "user", property(lambda self: me))
+    sent = {"thread": [], "channel": [], "reply": [], "names": []}
+
+    class Thread:
+        async def send(self, text, **_):
+            sent["thread"].append(text)
+
+    class Channel(bot.discord.TextChannel):
+        def __init__(self, can_thread=True):
+            self.can_thread = can_thread
+
+        def permissions_for(self, _):
+            return bot.discord.Permissions(create_public_threads=self.can_thread, send_messages_in_threads=True)
+
+        async def send(self, text, **_):
+            sent["channel"].append(text)
+
+    class Message:
+        def __init__(self, channel):
+            self.channel, self.content, self.id = channel, "<@42> how do I set up <#9> for the course?", 1
+            self.guild = SimpleNamespace(me=me, self_role=None)
+            self.author = SimpleNamespace(display_name="Will")
+
+        async def reply(self, text, **_):
+            sent["reply"].append(text)
+
+        async def create_thread(self, name, **_):
+            sent["names"].append(name)
+            return Thread()
+
+    long = " ".join(f"Step {i} is done." for i in range(6))
+    asyncio.run(b._send_reply(Message(Channel()), "Two sentences. That's all."))
+    assert sent["reply"] == ["Two sentences. That's all."] and not sent["thread"]
+
+    asyncio.run(b._send_reply(Message(Channel()), long))
+    assert sent["thread"] == [long] and sent["names"] == ["how do I set up for the course?"]
+
+    sent["thread"].clear()
+    asyncio.run(b._send_reply(Message(Channel()), "word " * 1000))  # over 2000 characters: several messages
+    assert len(sent["thread"]) == 3 and all(len(c) <= 2000 for c in sent["thread"])
+
+    sent["reply"].clear()
+    asyncio.run(b._send_reply(Message(Channel(can_thread=False)), long))  # no permission: in the channel
+    assert sent["reply"] == [long]
