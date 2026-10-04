@@ -144,7 +144,8 @@ network, add it to `DISABLED_TOOLS` or give searxng `"permissions": ["administra
 ## How it works
 - **Triggers**: an @mention, a ping of the bot's role, or a reply to one of the bot's messages.
 - **Context**: server, channel, requester (roles and permissions), the last `HISTORY_LIMIT` messages,
-  the replied-to message, mentioned users/roles/channels with IDs, attachments, and images if `VISION=true`.
+  the replied-to message (with `HISTORY_MODE=replies`, no channel history: just the message, or if it's a
+  reply, the chain of replies it continues, up to `HISTORY_LIMIT`, as conversation turns), mentioned users/roles/channels with IDs, attachments, and images if `VISION=true`.
 - **Agent loop** (`agent.py`): runs up to `MAX_TOOL_ROUNDS` rounds of tool calls, recovers from tool errors,
   strips Qwen `<think>` blocks, and also parses `<tool_call>` text when the server's tool parser is off.
 - **Safety** (`permissions.py`): the model is only *given* the tools the requester could use themselves:

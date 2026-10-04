@@ -79,6 +79,7 @@ class Config:
 
     max_tool_rounds: int
     history_limit: int
+    history_mode: str  # channel: the last history_limit messages; replies: only the reply chain, if any
     tool_result_max_chars: int
     tool_timeout: float
 
@@ -111,6 +112,10 @@ def load_config() -> Config:
     if access not in ("everyone", "manage_guild", "administrator"):
         raise SystemExit(f"ACCESS must be everyone, manage_guild or administrator (got {access!r})")
 
+    history_mode = (os.getenv("HISTORY_MODE") or "channel").strip().lower()
+    if history_mode not in ("channel", "replies"):
+        raise SystemExit(f"HISTORY_MODE must be channel or replies (got {history_mode!r})")
+
     return Config(
         discord_token=token,
         chat_only=_bool("CHAT_ONLY", False),
@@ -125,6 +130,7 @@ def load_config() -> Config:
         vision=_bool("VISION", False),
         max_tool_rounds=int(os.getenv("MAX_TOOL_ROUNDS", "12")),
         history_limit=int(os.getenv("HISTORY_LIMIT", "20")),
+        history_mode=history_mode,
         tool_result_max_chars=int(os.getenv("TOOL_RESULT_MAX_CHARS", "6000")),
         tool_timeout=float(os.getenv("TOOL_TIMEOUT", "60")),
         owner_ids=_ids("OWNER_IDS"),
