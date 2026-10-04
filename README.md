@@ -152,7 +152,12 @@ network, add it to `DISABLED_TOOLS` or give searxng `"permissions": ["administra
   for anything not offered is refused, and every call is checked again against the requester's
   permissions in the target channel, plus role-hierarchy checks and an @everyone/role-ping guard.
   `guildId` is always forced to the current server. Changes made through discord-mcp go to the mod log.
-- **Access**: `OWNER_IDS` bypass every check. `ACCESS` is `everyone`, `manage_guild` or `administrator`
+- **One server per request** (`scope.py`): every ID in a tool call (channels, threads, categories, roles,
+  webhooks, invites, DM recipients) must belong to the server the request came from, or the call is refused;
+  ID arguments it doesn't know how to check are refused too. This applies to everyone, `OWNER_IDS` included,
+  so a prompt injection can't reach another server the bot is in. App emojis are shared by every server, so
+  only `OWNER_IDS` can change them.
+- **Access**: `OWNER_IDS` bypass the permission checks (not the one-server rule). `ACCESS` is `everyone`, `manage_guild` or `administrator`
   (the server owner always qualifies); `ALLOWED_ROLE_IDS` limits the bot to members with one of those roles.
   Both can be set per server.
 - One request at a time per channel, a per-user cooldown, and long replies split across messages.

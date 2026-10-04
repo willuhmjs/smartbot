@@ -203,3 +203,24 @@ def test_chat_only_has_no_tools_commands_or_moderation(tmp_path, monkeypatch):
     text = bot.CHAT_PROMPT.format(bot_name="B", bot_id=1, now="n", guild_name="G", channel_name="c", channel_extra="",
                                   author_name="a", author_username="a", author_id=4, persona="")
     assert "can't take actions in Discord" in text
+
+
+def test_executor_keeps_calls_in_this_server_even_for_owners(tmp_path, monkeypatch):
+    b = make_bot(tmp_path, monkeypatch, OWNER_IDS="7")
+    b.mcp.tools["send_message"] = {"description": "", "inputSchema": {"type": "object", "properties": {
+        "channelId": {"type": "string"}, "content": {"type": "string"}}}}
+    called = []
+
+    async def call_tool(name, args):
+        called.append(args)
+        return False, "ok"
+    monkeypatch.setattr(b.mcp, "call_tool", call_tool)
+
+    async def fetch_channel(cid):                        # a channel in some other server the bot is in
+        return SimpleNamespace(guild=SimpleNamespace(id=2))
+    monkeypatch.setattr(b, "fetch_channel", fetch_channel)
+    m = member(uid=7)
+    msg = SimpleNamespace(author=m, guild=m.guild, channel=SimpleNamespace(mention="#c"))
+    execute = b._make_executor(msg, set(), {"send_message"})
+    result = asyncio.run(execute("send_message", {"channelId": "222222222222222222", "content": "hi"}))
+    assert result.startswith("PERMISSION DENIED: channel 222222222222222222 isn't in this server") and called == []

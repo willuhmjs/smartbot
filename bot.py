@@ -20,6 +20,7 @@ from permissions import (TOOL_PERMISSIONS, is_staff, check_tool_permission, effe
                          tool_allowed)
 from profiles import Profiles
 from ratelimit import RateLimiter
+from scope import check_scope
 from store import Store
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -45,7 +46,7 @@ and link your sources.
 ## How to work
 - Work out what the user actually wants, then do it. Use tools to look things up instead of guessing: \
 use find_channel, list_channels, list_roles, get_user_id_by_name and similar to resolve names to IDs.
-- The server is fixed. Never pass a guildId; it's filled in for you.
+- You can only act on (and read) this server: IDs from any other server are refused. Never pass a guildId; it's filled in for you.
 - Chain tools when needed. For example: find the category, create the channel in it, then set permissions.
 - If a tool returns an error, read it and try to fix the problem (wrong ID, missing argument). Don't \
 retry the exact same failing call more than once.
@@ -364,6 +365,16 @@ class SmartBot(discord.Client):
                 args.pop(p, None)
                 if p in schema_props:
                     args[p] = str(guild.id)
+
+            if client is self.mcp:
+                # Every ID must belong to this server, whoever is asking (see scope.py).
+                denial = await check_scope(self, guild, name, args, guild_params,
+                                           any(p in schema_props for p in guild_params),
+                                           author.id in self.cfg.owner_ids)
+                if denial:
+                    log.warning("OUT OF SCOPE %s (%s) in %s -> %s %s (%s)", author, author.id, guild.name, name, args,
+                                denial)
+                    return f"PERMISSION DENIED: {denial}. You can only act on this server."
 
             required = None if client is self.mcp else self._server_perms[client.name]
             denial = await check_tool_permission(name, args, author, self.cfg.owner_ids, required)
