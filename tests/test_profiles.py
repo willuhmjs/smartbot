@@ -183,3 +183,13 @@ def test_ids_from_the_file_become_ints(tmp_path):
     write(tmp_path, {"servers": {"1": {"modlog_channel": "22", "automod_channels": ["33", 44]}}})
     p = load(tmp_path)
     assert p.get(1, "modlog_channel") == 22 and p.get(1, "automod_channels") == [33, 44]
+
+
+def test_editing_an_image_file_counts_as_a_change(tmp_path):
+    (tmp_path / "a.png").write_bytes(PNG)
+    write(tmp_path, {"default": {"avatar": "a.png"}})
+    p = load(tmp_path)
+    assert not p.reload_if_changed()
+    (tmp_path / "a.png").write_bytes(PNG + b"1")
+    os.utime(tmp_path / "a.png", ns=(0, os.stat(tmp_path / "a.png").st_mtime_ns + 1_000_000_000))
+    assert p.reload_if_changed()

@@ -61,6 +61,10 @@ class Profiles:
         for entry in [self.default, *self.servers.values()]:
             if entry.get("persona_file"):
                 files.append(self._resolve(entry["persona_file"]))
+            for field in ("avatar", "banner"):
+                ref = entry.get(field)
+                if ref and not ref.startswith(("https://", "http://", IMAGE_PREFIX)):
+                    files.append(self._resolve(ref))
         return files
 
     def _current_signature(self) -> tuple:
@@ -73,7 +77,7 @@ class Profiles:
         return tuple(sig)
 
     def reload_if_changed(self) -> bool:
-        """Re-read the profiles file if it (or a persona file it names) changed. Returns True if it did.
+        """Re-read the profiles file if it (or a persona or image file it names) changed. Returns True if it did.
         A broken file is logged and the previous profiles stay in effect."""
         if not self.path:
             return False
