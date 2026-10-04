@@ -66,7 +66,8 @@ resend everything. Changing the nickname needs the **Change Nickname** permissio
 Members with **Manage Server** can change the bot's settings in their server, either with slash commands
 or by asking it (`@SmartBot turn on automod and log to #mod-log`). Changes are stored in
 the database and layered on top of `profiles.json`; `/settings reset` goes back to the
-deployment's value.
+deployment's value. The slash commands are registered in each server the bot is in, when it starts and when
+it joins one.
 
 | Command | |
 |---|---|
@@ -115,6 +116,13 @@ uploaded avatars and banners, and what it last sent to Discord for each profile.
 the bot's account. It uses SQLite's default rollback journal, not WAL, so it works on NFS, as long as only
 one bot process uses it. Back it up with `sqlite3 data/smartbot.db ".backup backup.db"`. A
 `.profile-state.json` from older versions is imported once.
+
+## Chat only
+
+`CHAT_ONLY=true` runs the bot as a plain chatbot: it never connects to discord-mcp or any server in
+`mcp_servers.json`, offers the model no tools at all (not even its own settings tools), registers no slash
+commands, and does no automod or anti-spam. Only the bot process is needed. Access, per-server profiles
+(name, picture, persona, model) and member rate limits still apply; set the identity in `profiles.json`.
 
 ## Running discord-mcp privately
 

@@ -65,6 +65,7 @@ def load_mcp_servers(path: str) -> tuple[list[dict], list[str]]:
 @dataclass(frozen=True)
 class Config:
     discord_token: str
+    chat_only: bool  # no tools at all (no discord-mcp, extra MCP servers or settings tools), no slash commands or moderation
     mcp_url: str
     mcp_socket: str  # Unix socket path for discord-mcp; empty means connect to mcp_url over TCP
 
@@ -112,6 +113,7 @@ def load_config() -> Config:
 
     return Config(
         discord_token=token,
+        chat_only=_bool("CHAT_ONLY", False),
         mcp_url=os.getenv("MCP_URL", "http://localhost:8085/mcp"),
         mcp_socket=os.getenv("MCP_SOCKET", ""),
         llm_base_url=os.getenv("LLM_BASE_URL", "http://localhost:11434/v1"),

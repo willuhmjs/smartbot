@@ -1,4 +1,5 @@
-"""SmartBot: @mention the bot and a Qwen agent handles the request with discord-mcp tools."""
+"""SmartBot: @mention the bot and a Qwen agent handles the request with discord-mcp tools (or, with
+CHAT_ONLY, just chats)."""
 
 import asyncio
 import json
@@ -74,6 +75,23 @@ exactly {no_reply}.
 - Once you've acted, confirm what you did in a sentence or two, mentioning the created or changed \
 things by name or link. Don't dump raw JSON or IDs unless they were asked for.
 - Answer normal questions and chat directly. Not everything needs a tool.
+{persona}"""
+
+CHAT_PROMPT = """You are {bot_name}, an AI assistant in the Discord server "{guild_name}". People @mention you or reply \
+to you to chat and ask questions. You have no tools: you can't take actions in Discord, browse the web or \
+look anything up, so answer from what you know and the conversation, and say so when you aren't sure.
+
+## Context
+- Current time (UTC): {now}
+- Server: {guild_name}
+- Current channel: #{channel_name}{channel_extra}
+- Your user id: {bot_id} (mention format <@{bot_id}>)
+- Requester: {author_name} (@{author_username}, id {author_id})
+
+## Style
+- Be concise and natural. Use Discord markdown where it helps, and fenced code blocks with a language for code.
+- Your reply is posted automatically as a reply to the requester's message.
+- To ping someone, use <@USER_ID>.
 {persona}"""
 
 MEMBER_NOTE = """
@@ -188,7 +206,7 @@ class SmartBot(discord.Client):
         self.mcp = McpClient("discord-mcp", url=cfg.mcp_url, timeout=cfg.tool_timeout,
                              socket_path=cfg.mcp_socket or None)
         # Extra servers from mcp_servers.json (e.g. SearXNG web search).
-        self.extra_mcp = [
+        self.extra_mcp = [] if cfg.chat_only else [
             McpClient(s["name"], url=s["url"], command=s["command"], args=s["args"], env=s["env"],
                       timeout=cfg.tool_timeout)
             for s in cfg.mcp_servers
@@ -209,20 +227,41 @@ class SmartBot(discord.Client):
         self.profiles.reload_if_changed()
         self.moderator = Moderator(self)
         self.controls = Controls(self)
-        self.tree = setup_commands(self)
+        self.tree = None if cfg.chat_only else setup_commands(self)
+        self._commands: list = []
+        self._synced_guilds: set[int] = set()
 
     async def setup_hook(self) -> None:
+        self._profiles_task = asyncio.create_task(self._watch_profiles(), name="profiles")
+        if self.cfg.chat_only:
+            log.info("Chat only: no tools, slash commands or moderation")
+            return
         for skipped in self.cfg.mcp_servers_skipped:
             log.info("MCP server skipped: %s", skipped)
         for client in self.extra_mcp:
             await client.start(wait=0)
         await self.mcp.start()
-        self._profiles_task = asyncio.create_task(self._watch_profiles(), name="profiles")
+        # Commands are registered per server (see _sync_commands), which Discord shows straight away; global
+        # ones can stay missing in a server for a long time. This removes any older global registration.
+        self._commands = self.tree.get_commands()
+        self.tree.clear_commands(guild=None)
         try:
-            synced = await self.tree.sync()
-            log.info("Registered %d slash command group(s)", len(synced))
+            await self.tree.sync()
         except discord.HTTPException as e:
-            log.error("Couldn't register slash commands: %s", e)
+            log.error("Couldn't clear global slash commands: %s", e)
+
+    async def _sync_commands(self, guild: discord.Guild) -> None:
+        if self.tree is None or guild.id in self._synced_guilds:
+            return
+        self.tree.clear_commands(guild=guild)
+        for command in self._commands:
+            self.tree.add_command(command, guild=guild)
+        try:
+            synced = await self.tree.sync(guild=guild)
+            self._synced_guilds.add(guild.id)
+            log.info("Registered %d slash command group(s) in %s", len(synced), guild.name)
+        except discord.HTTPException as e:
+            log.error("Couldn't register slash commands in %s: %s", guild.name, e)
 
     async def close(self) -> None:
         for client in [self.mcp, *self.extra_mcp]:
@@ -232,18 +271,22 @@ class SmartBot(discord.Client):
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s (%s) in %d server(s)", self.user, self.user.id, len(self.guilds))
+        for guild in self.guilds:
+            await self._sync_commands(guild)
         await self._apply_profiles()
 
     async def on_guild_join(self, guild: discord.Guild) -> None:
+        await self._sync_commands(guild)
         await self.profiles.apply(self, guild)
 
     async def on_member_join(self, member: discord.Member) -> None:
         # Only delivered with the Server Members intent (MEMBERS_INTENT=true).
-        await self.moderator.member_joined(member)
+        if not self.cfg.chat_only:
+            await self.moderator.member_joined(member)
 
     async def on_message_edit(self, before: discord.Message, after: discord.Message) -> None:
         # Editing a message after it passed automod mustn't sneak a violation in.
-        if after.guild and not after.author.bot and before.content != after.content:
+        if after.guild and not after.author.bot and not self.cfg.chat_only and before.content != after.content:
             await self.moderator.check_message(after, edited=True)
 
     async def _apply_profiles(self) -> None:
@@ -362,16 +405,24 @@ class SmartBot(discord.Client):
         if getattr(channel, "topic", None):
             channel_extra += f"; topic: {channel.topic[:200]}"
 
-        roles = [r.name for r in reversed(author.roles) if not r.is_default()]
-        system = SYSTEM_PROMPT.format(
-            bot_name=guild.me.display_name, bot_id=self.user.id, now=_fmt_time(datetime.now(timezone.utc)),
-            guild_name=guild.name, guild_id=guild.id,
-            channel_name=getattr(channel, "name", "?"), channel_id=channel.id, channel_extra=channel_extra,
-            author_name=author.display_name, author_username=author.name, author_id=author.id,
-            author_roles=", ".join(roles[:15]) or "none",
-            author_perms=permission_summary(author), no_reply=NO_REPLY,
-            persona=PERSONA_SECTION.format(text=persona) if (persona := self.profiles.persona(guild.id)) else "",
-        )
+        persona = self.profiles.persona(guild.id)
+        persona = PERSONA_SECTION.format(text=persona) if persona else ""
+        if self.cfg.chat_only:
+            system = CHAT_PROMPT.format(
+                bot_name=guild.me.display_name, bot_id=self.user.id, now=_fmt_time(datetime.now(timezone.utc)),
+                guild_name=guild.name, channel_name=getattr(channel, "name", "?"), channel_extra=channel_extra,
+                author_name=author.display_name, author_username=author.name, author_id=author.id, persona=persona)
+            minimal = False  # chat only already means no tools; MEMBER_NOTE is about staff tools
+        else:
+            roles = [r.name for r in reversed(author.roles) if not r.is_default()]
+            system = SYSTEM_PROMPT.format(
+                bot_name=guild.me.display_name, bot_id=self.user.id, now=_fmt_time(datetime.now(timezone.utc)),
+                guild_name=guild.name, guild_id=guild.id,
+                channel_name=getattr(channel, "name", "?"), channel_id=channel.id, channel_extra=channel_extra,
+                author_name=author.display_name, author_username=author.name, author_id=author.id,
+                author_roles=", ".join(roles[:15]) or "none",
+                author_perms=permission_summary(author), no_reply=NO_REPLY, persona=persona,
+            )
         if minimal:
             system += MEMBER_NOTE
         messages: list[dict] = [{"role": "system", "content": system}]
@@ -445,7 +496,7 @@ class SmartBot(discord.Client):
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot:
             return
-        if message.guild is not None and isinstance(message.author, discord.Member):
+        if message.guild is not None and isinstance(message.author, discord.Member) and not self.cfg.chat_only:
             if await self.moderator.check_message(message):
                 return  # removed by anti-spam or automod
         if not self._is_triggered(message):
@@ -501,7 +552,7 @@ class SmartBot(discord.Client):
         return True
 
     async def _handle(self, message: discord.Message, minimal: bool = False) -> None:
-        if minimal:
+        if minimal or self.cfg.chat_only:
             tools: list[dict] = []
             guild_params: set[str] = set()
         elif not self.mcp.tools:

@@ -171,3 +171,35 @@ def test_non_staff_get_no_tools_in_staff_mode(tmp_path, monkeypatch):
     asyncio.run(b._handle(msg, minimal=True))
     assert seen["tools"] == [] and seen["system"] == "minimal"
     assert seen["refused"].startswith("ERROR: unknown tool")
+
+
+def test_chat_only_has_no_tools_commands_or_moderation(tmp_path, monkeypatch):
+    b = make_bot(tmp_path, monkeypatch, CHAT_ONLY="true", OWNER_IDS="7")
+    assert b.tree is None and b.extra_mcp == []
+    seen = {}
+
+    async def run(messages, tools, execute, model=None):
+        seen["tools"] = tools
+        seen["refused"] = await execute("list_channels", {})
+        return SimpleNamespace(text="hi", tools_used=[])
+    monkeypatch.setattr(b.agent, "run", run)
+
+    async def build(message, minimal=False):
+        return [{"role": "system", "content": "x"}]
+    monkeypatch.setattr(b, "_build_messages", build)
+
+    async def reply(message, text):
+        seen["reply"] = text
+    monkeypatch.setattr(b, "_send_reply", reply)
+
+    class Typing:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+    m = member(uid=7, administrator=True)                      # even the owner, and with no discord-mcp running
+    msg = SimpleNamespace(author=m, guild=m.guild, id=1, channel=SimpleNamespace(typing=Typing, mention="#c"))
+    asyncio.run(b._handle(msg))
+    assert seen["tools"] == [] and seen["reply"] == "hi"
+    assert seen["refused"].startswith("ERROR: unknown tool")
+    text = bot.CHAT_PROMPT.format(bot_name="B", bot_id=1, now="n", guild_name="G", channel_name="c", channel_extra="",
+                                  author_name="a", author_username="a", author_id=4, persona="")
+    assert "no tools" in text
